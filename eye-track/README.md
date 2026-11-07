@@ -22,6 +22,7 @@ To refresh dependencies after `environment.yml` changes: `conda env update -f ey
 
 | Key | Action |
 |-----|--------|
+| F6  | Pause-while-talking on/off (global) |
 | F7  | Cursor control on/off (global) |
 | F8  | Calibrate (global) |
 | F9  | Accuracy check (global) |
@@ -31,6 +32,24 @@ To refresh dependencies after `environment.yml` changes: `conda env update -f ey
 | `q` | Quit (debug window focused) |
 
 The calibration is saved to `calibration.json` and reloaded on the next start (control starts OFF).
+
+## Pause while talking (Presage)
+
+When you start talking, all mouse input stops: the cursor freezes where it is, and future click inputs must check `App.inputs_paused` too. Input resumes about 0.7 s after you stop talking. While paused, the camera view gets a red border and a "TALKING - INPUT PAUSED" banner.
+
+Two detectors are available ([talk_detect.py](talk_detect.py)):
+
+- **Presage SmartSpectra** (preferred): its `TALKING` metric. The SDK is Node-only, so [presage/talk_bridge.mjs](presage/talk_bridge.mjs) runs as a child process, and `eye_cursor.py` streams its webcam frames to it over stdin. Python keeps the only handle to the camera. One-time setup:
+  ```bash
+  cd eye-track/presage && npm install     # pulls ~few hundred MB of native runtimes
+  ```
+  Then put your key (from [physiology.presagetech.com](https://physiology.presagetech.com)) in `eye-track/.env`, which is gitignored:
+  ```text
+  PRESAGE_API_KEY=your-key-here
+  ```
+- **Local fallback**: when Presage isn't available, the lip gap from MediaPipe landmarks is used instead. Three or more open/close cycles within 0.7 s count as talking, so a yawn or a single mouth opening doesn't.
+
+The debug window shows which detector is active, the Presage status (for example `no API key`, `auth failed`, or `running`), and the fallback's live `lips range/reversals` values for tuning. Set `TALK_MODE` in `talk_detect.py` to `auto` (default: Presage if live, else local), `both`, `presage`, or `local`.
 
 ## Debug window
 

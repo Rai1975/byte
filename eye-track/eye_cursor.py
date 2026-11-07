@@ -9,7 +9,11 @@ Pipeline
          -> One Euro filter (low jitter when still, responsive when moving)
          -> 120 Hz cursor driver (pynput) that glides toward the filtered gaze point
 
+While the user is talking, ALL mouse input is paused (talk_detect.py: Presage TALKING metric,
+with a lip-movement fallback). Any new input (e.g. clicks) must check `App.inputs_paused`.
+
 Hotkeys (global, work even when another window has focus)
+  F6  toggle pause-while-talking on/off
   F7  toggle cursor control on/off
   F8  recalibrate
   F9  run accuracy validation
@@ -45,6 +49,8 @@ import mediapipe as mp
 from mediapipe.tasks.python import BaseOptions, vision
 from pynput import keyboard as pkeyboard
 from pynput import mouse as pmouse
+
+from talk_detect import TalkGate
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(HERE, "face_landmarker.task")
@@ -252,6 +258,7 @@ class CursorDriver(threading.Thread):
         self.sw, self.sh = sw, sh
         self.target = None
         self.enabled = False
+        self.paused = False     # True while the user is talking: cursor stays exactly where it is
         self.alive = True
         self._pos = None
 
@@ -264,7 +271,7 @@ class CursorDriver(threading.Thread):
         period = 1.0 / CURSOR_HZ
         while self.alive:
             t = self.target
-            if self.enabled and t is not None:
+            if self.enabled and not self.paused and t is not None:
                 if self._pos is None:
                     self._pos = np.array(self.mouse.position, dtype=float)
                 self._pos += (np.asarray(t) - self._pos) * CURSOR_GLIDE
@@ -309,6 +316,10 @@ class App:
         self.cursor = CursorDriver(self.sw, self.sh)
         self.cursor.start()
 
+        # Talking pauses ALL mouse input (cursor now; clicks must check `inputs_paused` too).
+        self.talk = TalkGate()
+        self.talking = False
+
         self.keys = queue.Queue()
         self.listener = pkeyboard.Listener(on_press=self._on_global_key)
         self.listener.start()
@@ -336,7 +347,7 @@ class App:
 
     # ------------------------------------------------------------------ input
     def _on_global_key(self, key):
-        names = {pkeyboard.Key.f7: "toggle", pkeyboard.Key.f8: "calib", pkeyboard.Key.f9: "valid",
+        names = {pkeyboard.Key.f6: "talk", pkeyboard.Key.f7: "toggle", pkeyboard.Key.f8: "calib", pkeyboard.Key.f9: "valid",
                  pkeyboard.Key.f10: "quit", pkeyboard.Key.space: "space", pkeyboard.Key.esc: "esc"}
         if key in names:
             self.keys.put(names[key])
@@ -379,12 +390,23 @@ class App:
         img = mp.Image(image_format=mp.ImageFormat.SRGB, data=cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
         res = self.landmarker.detect_for_video(img, ts)
         info = extract(res, frame.shape[1], frame.shape[0])
+        now = time.time()
+        self.talk.feed(frame, info, now)
+        self.talking = self.talk.talking(now)
         return frame, info
 
+    @property
+    def inputs_paused(self):
+        """True while the user is talking. Every input (cursor, clicks) must respect this."""
+        return self.talking
+
     def update_gaze(self, info, now):
+        self.cursor.paused = self.inputs_paused
         if info is None or not self.model.ready:
             return
         self.iris_trail.append((info["ix"], info["iy"]))
+        if self.inputs_paused:
+            return  # talking: freeze the cursor; mouth movement also distorts the gaze features
         if info["blink"] > BLINK_THRESH:
             return  # hold position through blinks
         raw = self.model.predict(info["feat"])
@@ -468,7 +490,7 @@ class App:
                 now = time.time()
                 el = now - t0
                 frame, info = self.grab()
-                good = info is not None and info["blink"] < BLINK_THRESH
+                good = info is not None and info["blink"] < BLINK_THRESH and not self.talking
                 collecting = el >= SETTLE_S
                 if collecting and good:
                     if mode == "calib":
@@ -651,6 +673,9 @@ class App:
             cv2.arrowedLine(cam, tuple(nose.astype(int)), tuple(tip.astype(int)), C_YELLOW, 2, cv2.LINE_AA)
             if info["blink"] > BLINK_THRESH:
                 put(cam, "BLINK - holding", (10, cam_h - 15), 0.7, C_YELLOW, 2, bg=(0, 0, 0))
+        if self.talking:
+            cv2.rectangle(cam, (0, 0), (cam_w - 1, cam_h - 1), C_RED, 4)
+            put(cam, "TALKING - INPUT PAUSED", (12, 34), 0.8, C_WHITE, 2, bg=(40, 40, 200))
         else:
             put(cam, "NO FACE", (cam_w // 2 - 70, cam_h // 2), 1.0, C_RED, 2, bg=(0, 0, 0))
         canvas[:cam_h, :cam_w] = cam
@@ -762,10 +787,15 @@ class App:
         put(canvas, "   ".join(line2) or "not validated", (10, ty + 24), 0.5)
         put(canvas, f"smoothing: min_cutoff {self.filter.min_cutoff:.2f} Hz  [ ]    "
                     f"beta {self.filter.beta:.4f}  - =", (10, ty + 48), 0.5, C_GRAY)
-        put(canvas, "F7 cursor on/off   F8 calibrate   F9 accuracy check   F10 quit",
-            (10, ty + 76), 0.5, C_CYAN)
+        lt = self.talk.local
+        talk_line = (f"talk detect [{self.talk.source}]: {'TALKING' if self.talking else 'quiet'}   "
+                     f"Presage: {self.talk.presage_status()}   "
+                     f"lips {lt.level:.3f}/{lt.reversals}")
+        put(canvas, talk_line, (10, ty + 72), 0.45, C_RED if self.talking else C_GRAY)
+        put(canvas, "F6 talk-pause on/off  F7 cursor on/off  F8 calibrate  F9 accuracy  F10 quit",
+            (10, ty + 98), 0.5, C_CYAN)
         if time.time() < self.message_until:
-            put(canvas, self.message, (10, ty + 104), 0.5, C_YELLOW)
+            put(canvas, self.message, (10, ty + 124), 0.5, C_YELLOW)
         return canvas
 
     # ------------------------------------------------------------------ main loop
@@ -776,7 +806,10 @@ class App:
                 for ev in self._take_events():
                     if ev == "quit":
                         return
-                    if ev == "toggle":
+                    if ev == "talk":
+                        self.talk.enabled = not self.talk.enabled
+                        self.flash(f"Pause-while-talking {'ON' if self.talk.enabled else 'OFF'}", 3)
+                    elif ev == "toggle":
                         if self.model.ready:
                             self.cursor.set_enabled(not self.cursor.enabled)
                             self.filter.reset()
@@ -817,6 +850,7 @@ class App:
         finally:
             self.cursor.alive = False
             self.listener.stop()
+            self.talk.close()
             self.cap.release()
             cv2.destroyAllWindows()
 
@@ -824,7 +858,7 @@ class App:
         ev = []
         while not self.keys.empty():
             e = self.keys.get_nowait()
-            if e in ("quit", "toggle", "calib", "valid"):
+            if e in ("quit", "toggle", "calib", "valid", "talk"):
                 ev.append(e)
         return ev
 

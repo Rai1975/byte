@@ -1,0 +1,11 @@
+{
+  "name": "presage-talk-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Presage SmartSpectra talking detection, fed with frames from eye_cursor.py",
+  "type": "module",
+  "main": "talk_bridge.mjs",
+  "dependencies": {
+    "@smartspectra/node-sdk": "3.4.0"
+  }
+}
