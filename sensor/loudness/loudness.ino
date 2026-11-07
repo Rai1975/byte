@@ -7,7 +7,7 @@
 #define USE_DIGITAL 0
 
 void setup() {
-  Serial.begin(9600);
+  Serial.begin(115200);  // must match BAUD in plot.py / test.py
   pinMode(SENSOR_PIN, INPUT);
 }
 
@@ -18,5 +18,5 @@ void loop() {
   int v = analogRead(SENSOR_PIN);
 #endif
   Serial.println(v);
-  delay(20);  // ~50 samples/sec
+  delay(1);  // up to ~1000 samples/sec (fast enough to catch tap transients)
 }
