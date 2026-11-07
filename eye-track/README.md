@@ -1,44 +1,60 @@
-# Mouth Click
+# Eye Track: webcam eye-tracking cursor
 
-Assistive input system combining head-tracking cursor movement, speech-to-text, and bite-based clicking.
+Moves the mouse cursor to where you look, using only a webcam. A live debug window shows the camera feed, zoomed eyes, the raw iris signal, and where the tracker thinks you're looking on screen.
 
-## Components
-
-### `bite_click.py` — Bite-to-Click (MediaPipe)
-Detects jaw clenching via webcam using MediaPipe Face Mesh. Tracks chin-to-nose distance — when you bite, that distance shrinks, triggering a mouse click.
-
-- Gentle bite = left click
-- Hard bite = right click
-
-### `mouth_click.mjs` — Presage SmartSpectra Integration
-Uses Presage SDK for blink detection and facial expressions. Use this for the broader pipeline (cursor tracking, speech-to-text).
-
-## Quick Start — Bite Click
+## Setup
 
 ```bash
-pip install opencv-python mediapipe pynput
-python bite_click.py
+conda env create -f eye-track/environment.yml   # one time
+conda activate makeuc-eye
+python eye-track/eye_cursor.py                 # --camera 1 to pick another webcam
 ```
 
-1. Keep jaw relaxed during calibration (~2 seconds)
-2. Bite gently to left-click, bite hard to right-click
-3. Press `q` to quit
+To refresh dependencies after `environment.yml` changes: `conda env update -f eye-track/environment.yml --prune`.
 
-### Tuning
+`face_landmarker.task` (the MediaPipe model) must sit next to the script.
 
-Watch the `Drop` percentage on screen while biting, then edit thresholds in `bite_click.py`:
+## Using it
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `GENTLE_BITE_PERCENT` | `0.06` | % drop from baseline for left click |
-| `HARD_BITE_PERCENT` | `0.12` | % drop from baseline for right click |
-| `COOLDOWN_SECONDS` | `0.4` | Minimum time between clicks |
+1. Press **F8** to calibrate. Sit how you normally will, keep your head still, press SPACE, and follow the 13 dots with your eyes.
+2. An **accuracy check** (9 dots) runs straight after and shows the error in px, cm, and degrees. Cursor control then turns on.
+3. To recalibrate, press F8 again, especially after you move your chair or laptop or the lighting changes.
 
-## Quick Start — Presage Integration
+| Key | Action |
+|-----|--------|
+| F7  | Cursor control on/off (global) |
+| F8  | Calibrate (global) |
+| F9  | Accuracy check (global) |
+| F10 | Quit (global) |
+| `[` / `]` | Less / more smoothing (debug window focused) |
+| `-` / `=` | Less / more responsiveness during fast moves |
+| `q` | Quit (debug window focused) |
 
-```bash
-npm install
-npm start
-```
+The calibration is saved to `calibration.json` and reloaded on the next start (control starts OFF).
 
-Requires a Presage API key — set `PRESAGE_API_KEY` env var or edit `mouth_click.mjs`.
+## Debug window
+
+- **Camera**: eye contours (cyan), iris (green ring, red center), and head direction (yellow arrow). "BLINK" means the cursor is frozen.
+- **Eyes (zoomed)**: crops of each eye. The cyan × is the eye-corner midpoint and the red + is the iris center. Their offset is the signal.
+- **Iris offset**: normalized iris position (the "joystick") with a short trail. The purple box is the range covered during calibration.
+- **Screen**: minimap of your monitor. Red = raw prediction, green = smoothed, white cross = actual cursor.
+
+## How it works
+
+1. **MediaPipe FaceLandmarker** returns 478 landmarks (including 10 iris points), a head-pose matrix, and blendshapes.
+2. **Features** (per frame):
+   - The iris center relative to the eye-corner midpoint, rotated into the eye's own axis and divided by eye width. This makes it independent of head roll and distance.
+   - Eye openness, which helps with vertical gaze.
+   - Head yaw and pitch.
+   - Both eyes are averaged, weighted by eye width.
+3. **Calibration**: 13 dots, about 1 s of samples each after a settle delay. Saccade and glitch frames are rejected per dot with a median/MAD filter.
+4. **Model**: ridge-regularized regression on `[1, features, iris_x², iris_y², iris_x·iris_y]` → screen x, y. Including head pose lets small head movements count instead of breaking the mapping.
+5. **Smoothing**: a One Euro filter (steady when you fixate, low lag when you move). A 120 Hz cursor thread glides between camera frames, and the cursor holds still during blinks.
+
+## Tips for accuracy
+
+- Light your face from the front and avoid a bright window behind you.
+- Raise the webcam to eye level if you can, so your eyes aren't half hidden by your lids.
+- Sit closer: a bigger iris in the image means less jitter.
+- Calibrate in the posture you'll use. If the error is high on one side, recalibrate.
+- Typical webcam eye tracking reaches about 1.5–3° of error. Lean on smoothing and large targets.
