@@ -17,6 +17,5 @@ void loop() {
 #else
   int v = analogRead(SENSOR_PIN);
 #endif
-  Serial.println(v);
-  delay(1);  // up to ~1000 samples/sec (fast enough to catch tap transients)
+  Serial.println(v);  // no delay: runs as fast as analogRead + serial allow
 }
