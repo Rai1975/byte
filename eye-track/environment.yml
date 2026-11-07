@@ -1,0 +1,14 @@
+# conda env create -f eye-track/environment.yml
+# conda activate makeuc-eye
+name: makeuc-eye
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - pip
+  - pip:
+      - mediapipe>=1.2,<2        # Tasks API (FaceLandmarker); no legacy mp.solutions
+      - opencv-python>=4.10
+      - numpy>=2.0
+      - pynput>=1.8
+      - screeninfo>=0.8
