@@ -1,4 +1,4 @@
-# pip install pyserial matplotlib
+# pip install pyserial matplotlib pynput
 # Live tap detector for the Grove loudness sensor on the Uno Q (teeth tapping via jaw).
 # Close the window to stop.
 #
@@ -17,6 +17,8 @@ import time
 
 import matplotlib.pyplot as plt
 import serial
+from pynput import keyboard
+from pynput.mouse import Button, Controller
 from matplotlib.animation import FuncAnimation
 
 PORT = 'COM5'
@@ -36,6 +38,44 @@ TAP_HOLD = 50          # SAMPLES after a tap during which the slow (hum) envelop
 CLICK_GAP = 33        # SAMPLES: taps closer together than this belong to the same click group
 FLOOR = 0              # signal never goes below this (stops the dip after each tap)
 Y_MAX = 150            # y-axis top
+# --------------------------------------------------------------------------
+
+# --- OS mouse control -----------------------------------------------------
+# single  -> left click            double -> double click
+# triple  -> start drag (hold left button); next single -> drop (release)
+# Clicks land wherever the cursor currently is. F8 turns OS clicking on/off.
+mouse = Controller()
+os_state = {'enabled': True, 'dragging': False}
+
+
+def do_gesture(name):
+    if not os_state['enabled']:
+        return
+    if os_state['dragging']:
+        if name == 'SINGLE click':
+            mouse.release(Button.left)
+            os_state['dragging'] = False
+            print('  -> DROP (drag off)', flush=True)
+        return  # while dragging, only a single click does anything
+    if name == 'SINGLE click':
+        mouse.click(Button.left, 1)
+    elif name == 'DOUBLE click':
+        mouse.click(Button.left, 2)
+    elif name == 'TRIPLE click':
+        mouse.press(Button.left)
+        os_state['dragging'] = True
+        print('  -> DRAG ON (single click to drop)', flush=True)
+
+
+def toggle_enabled():
+    os_state['enabled'] = not os_state['enabled']
+    if not os_state['enabled'] and os_state['dragging']:
+        mouse.release(Button.left)
+        os_state['dragging'] = False
+    print(f"OS clicking {'ON' if os_state['enabled'] else 'OFF'}", flush=True)
+
+
+keyboard.GlobalHotKeys({'<f8>': toggle_enabled}).start()
 # --------------------------------------------------------------------------
 
 ser = serial.Serial(PORT, BAUD, timeout=1)
@@ -63,6 +103,7 @@ def reader():
         state['label'], state['label_t'] = name, time.time()
         state['history'] = (state['history'] + [name])[-5:]
         print(name, flush=True)
+        do_gesture(name)
         group = 0
     rate_t, rate_n = time.time(), 0
     while running:
@@ -127,7 +168,8 @@ def update(_):
     start = state['n'] - WINDOW
     xs = [i - start for i in list(taps) if i >= start]
     dots.set_data(xs, [THRESHOLD] * len(xs))
-    ax.set_title(f"Taps: {state['count']}   ({state['rate']:.0f} samples/s)")
+    mode = 'DRAGGING' if os_state['dragging'] else ('mouse ON' if os_state['enabled'] else 'mouse OFF (F8)')
+    ax.set_title(f"Taps: {state['count']}   ({state['rate']:.0f} samples/s)   [{mode}]")
     fresh = time.time() - state['label_t'] < 1.5   # show the latest result for 1.5 s
     label_txt.set_text(state['label'] if fresh else '')
     hist_txt.set_text(chr(10).join(reversed(state['history'])))
@@ -139,4 +181,6 @@ try:
     plt.show()
 finally:
     running = False
+    if os_state['dragging']:
+        mouse.release(Button.left)   # never leave the button held on exit
     ser.close()
