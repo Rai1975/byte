@@ -3,7 +3,7 @@
 import serial, time, sys
 
 PORT = 'COM5'
-BAUD = 9600
+BAUD = 115200
 
 ser = serial.Serial(PORT, BAUD, timeout=1)
 time.sleep(2)  # the board resets when the port opens
