@@ -17,6 +17,8 @@ Hotkeys (global, work even when another window has focus)
   F7  toggle cursor control on/off
   F8  full calibration: dots + moving dot, then test, repeated until error < TARGET_PX
   F11 add another moving-dot round to the existing data, then test
+  F4  recenter: look at the middle dot, the cursor jumps to the center and the gaze zero-point is re-aligned
+  F12 posture-shift check (lean closer / sit sideways), scored separately, never used for fitting
   F9  run accuracy validation
   F10 quit
 Debug-window keys (window must be focused)
@@ -29,6 +31,11 @@ import ctypes
 import json
 import math
 import os
+
+# Many small matrix solves: BLAS multithreading only adds overhead (3x slower fits measured), so use 1
+# thread. Must run before numpy is imported.
+for _v in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS"):
+    os.environ.setdefault(_v, "1")
 import queue
 import threading
 import time
@@ -51,35 +58,43 @@ from mediapipe.tasks.python import BaseOptions, vision
 from pynput import keyboard as pkeyboard
 from pynput import mouse as pmouse
 
+from gaze_model import GazeModel, HeadComp, RIDGE, fit_pool, load_prior, robust_mask
+import samples as sessions
+from runtime_filters import FixationHold, OneEuro, OnlineRefiner
+from speech import Speaker
 from talk_detect import TalkGate
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 MODEL_PATH = os.path.join(HERE, "face_landmarker.task")
 CALIB_PATH = os.path.join(HERE, "calibration.json")
+PRIOR_PATH = os.path.join(HERE, "prior.json")   # optional population prior (build_prior.py); absent = zeros
 
 # ----------------------------------------------------------------------------- tuning
 CAM_W, CAM_H, CAM_FPS = 1280, 720, 30
-SETTLE_S = 1.4          # time to let the eyes land on a calibration dot before sampling
-COLLECT_S = 1.8         # sampling time per calibration dot
+SETTLE_S = 0.7          # fixed wait before sampling a dot (late settling is dropped adaptively at fit time)
+COLLECT_S = 2.0         # sampling time per calibration dot
 MIN_SAMPLES = 20        # minimum good frames per dot
-RIDGE = 0.01            # fallback regularization strength (normally chosen by cross-validation)
 BLINK_THRESH = 0.45     # blendshape eyeBlink score above which the cursor freezes
 ONE_EURO_MIN_CUTOFF = 0.6   # Hz; lower = steadier when still
 ONE_EURO_BETA = 0.004       # higher = less lag during fast movements
 ONE_EURO_D_CUTOFF = 1.0
 TARGET_PX = 35          # tune(): stop when the measured mean error is below this
 MAX_ROUNDS = 5          # tune(): hard cap on calibrate/test rounds
-PURSUIT_S = 30.0        # length of the moving-dot calibration
+PURSUIT_S = 25.0        # length of the moving-dot calibration (head still)
+MIXED_S = 20.0          # moving dot while the head moves freely
 PURSUIT_RAMP_S = 2.0    # the dot eases up from rest over this long
 PURSUIT_FX, PURSUIT_FY = 0.11, 0.16     # Lissajous frequencies (Hz) of the moving dot
 PURSUIT_LAGS = np.arange(0.0, 0.41, 0.05)   # candidate eye-lag behind the dot (s)
 HEAD_POINTS = [(0.5, 0.5), (0.2, 0.3), (0.8, 0.7)]   # static dots for the head-movement phase
-HEAD_S = 20.0           # seconds per static dot
-HEAD_PROMPT_S = 4.0     # seconds per head-movement instruction
+HEAD_S = 17.5           # seconds per static dot
+HEAD_PROMPT_S = 2.5     # seconds per head-movement instruction
 HEAD_PROMPTS = ["Move your head CLOSER to the screen", "TILT your head left, then right",
                 "SPIN (turn) your head left, then right", "Move your head BACK a little",
-                "NOD your head up, then down"]
+                "NOD your head up, then down", "SLIDE your head left, then right, without turning",
+                "Sit TALL, then slouch down"]
 CURSOR_HZ = 120
+# fixation hold (px values are for a 1920-px-wide screen and scale with the actual width)
+FIX_V_ENTER, FIX_V_EXIT, FIX_RADIUS, FIX_MIN_S = 200.0, 500.0, 90.0, 0.15   # tuned with eval_runtime.py
 CURSOR_GLIDE = 0.35     # fraction of remaining distance covered per cursor tick
 CAM_HFOV_DEG = 70       # typical webcam horizontal field of view (only used for distance estimate)
 IRIS_DIAMETER_MM = 11.7 # nearly constant across adults -> gives camera distance from iris size
@@ -88,6 +103,7 @@ IRIS_DIAMETER_MM = 11.7 # nearly constant across adults -> gives camera distance
 _CX = (0.04, 0.27, 0.5, 0.73, 0.96)
 _CY = (0.06, 0.28, 0.5, 0.72, 0.94)
 CALIB_POINTS = [(x, y) for j, y in enumerate(_CY) for x in (_CX if j % 2 == 0 else _CX[::-1])]
+POSTURE_POINTS = [(0.2, 0.2), (0.8, 0.2), (0.5, 0.5), (0.2, 0.8), (0.8, 0.8)]   # posture-shift check
 VALID_POINTS = [(0.2, 0.2), (0.5, 0.15), (0.8, 0.2), (0.85, 0.5), (0.8, 0.8),
                 (0.5, 0.85), (0.2, 0.8), (0.15, 0.5), (0.5, 0.5)]
 
@@ -129,268 +145,6 @@ def screen_info():
     return sw, sh, width_mm
 
 
-class OneEuro:
-    """One Euro filter (Casiez et al. 2012) on a 2D point."""
-
-    def __init__(self, min_cutoff, beta, d_cutoff):
-        self.min_cutoff, self.beta, self.d_cutoff = min_cutoff, beta, d_cutoff
-        self.x = None
-        self.dx = np.zeros(2)
-        self.t = None
-
-    @staticmethod
-    def _alpha(cutoff, dt):
-        tau = 1.0 / (2 * math.pi * cutoff)
-        return 1.0 / (1.0 + tau / dt)
-
-    def reset(self):
-        self.x, self.t = None, None
-        self.dx = np.zeros(2)
-
-    def __call__(self, x, t):
-        x = np.asarray(x, dtype=float)
-        if self.x is None:
-            self.x, self.t = x, t
-            return x
-        dt = max(t - self.t, 1e-3)
-        self.t = t
-        dx = (x - self.x) / dt
-        a_d = self._alpha(self.d_cutoff, dt)
-        self.dx = a_d * dx + (1 - a_d) * self.dx
-        cutoff = self.min_cutoff + self.beta * np.linalg.norm(self.dx)
-        a = self._alpha(cutoff, dt)
-        self.x = a * x + (1 - a) * self.x
-        return self.x
-
-
-class HeadComp:
-    """Removes the effect of head pose from the iris offset.
-
-    Learned ONLY from the head-movement phase, where the gaze target is fixed: any change of the
-    iris offset there is caused by head movement, so within each static dot we regress the iris
-    offset change on the head-pose change (linear, ridge). The eye model then sees
-        iris' = iris - B . (head_pose - neutral_pose)
-    which is what the iris would read with the head at its neutral pose. neutral_pose = mean pose
-    of the head-still phases."""
-
-    COLS = [3, 4, 5, 6, 7, 8]       # head yaw, pitch, x, y, z, roll in the feature vector
-    MIN_R2 = 0.05                   # below this the compensation is switched off
-
-    def __init__(self):
-        self.B = np.zeros((len(self.COLS), 2))
-        self.ref = np.zeros(len(self.COLS))
-        self.r2 = None
-
-    def fit(self, Fh, Vh, Fe, alpha=1e-3):
-        Fh, Vh = np.asarray(Fh, float), np.asarray(Vh)
-        H, I = Fh[:, self.COLS].copy(), Fh[:, :2].copy()
-        for v in np.unique(Vh):
-            m = Vh == v
-            H[m] -= H[m].mean(0)
-            I[m] -= I[m].mean(0)
-        sd = H.std(0) + 1e-9
-        X = H / sd
-        B = np.linalg.solve(X.T @ X + alpha * len(X) * np.eye(X.shape[1]), X.T @ I)
-        self.r2 = float(1 - ((I - X @ B) ** 2).sum() / (((I ** 2).sum()) + 1e-12))
-        self.B = B / sd[:, None] if self.r2 >= self.MIN_R2 else np.zeros_like(B)
-        Fe = np.asarray(Fe, float)
-        self.ref = Fe[:, self.COLS].mean(0) if len(Fe) else Fh[:, self.COLS].mean(0)
-
-    def apply(self, f):
-        f = np.array(f, float)
-        f[:2] -= (f[self.COLS] - self.ref) @ self.B
-        return f
-
-    def apply_many(self, F):
-        F = np.array(F, float)
-        F[:, :2] -= (F[:, self.COLS] - self.ref) @ self.B
-        return F
-
-    def to_dict(self):
-        return dict(B=self.B.tolist(), ref=self.ref.tolist(), r2=self.r2)
-
-    def from_dict(self, d):
-        self.B, self.ref, self.r2 = np.array(d["B"]), np.array(d["ref"]), d.get("r2")
-
-
-class GazeModel:
-    """Two-stage gaze regression (features -> screen px).
-
-    Stage 1: one ridge regression per screen axis on standardized features. Each axis picks its own
-    polynomial order (linear / quadratic / cubic in the iris offset) and ridge strength by
-    leave-one-group-out cross-validation (a group = one calibration dot or one pursuit segment).
-
-    Stage 2 ("residual field"): the stage-1 error still depends on WHERE on the screen you look
-    (lens/eye geometry bends the mapping). The held-out stage-1 errors are smoothed into a field over
-    predicted screen position (Gaussian kernel, Nadaraya-Watson with shrinkage), and predictions are
-    nudged by that field. Kept only if it improves held-out error."""
-
-    FEATURES = ["iris_x", "iris_y", "openness", "head_yaw", "head_pitch",
-                "head_x", "head_y", "head_z", "head_roll"]
-    # feature sets tried (indices into FEATURES); the one with the best held-out error is used, so
-    # head-position features are dropped automatically when they only add noise
-    MASKS = ([0, 1, 2], [0, 1, 2, 3, 4, 5, 6, 7, 8])
-    KINDS = ("lin", "quad", "cubic")
-    ALPHAS = (1e-4, 1e-3, 1e-2, 3e-2, 0.1, 0.3, 1.0)
-    SIGMAS = (0.05, 0.08, 0.12, 0.2)    # field bandwidth, fraction of the screen size
-    LAMBDAS = (5.0, 25.0, 100.0)        # field shrinkage toward zero correction, in samples
-    CELL = 0.02                         # field binning cell, fraction of the screen size
-
-    def __init__(self):
-        self.mu = self.sd = None
-        self.axes = None        # per screen axis: dict(kind, alpha, W)
-        self.cols = None        # feature columns in use
-        self.scale = np.array([1920.0, 1080.0])
-        self.field = None       # dict(cen, res, cnt, sigma, lam) or None
-        self.cv_base = None     # held-out error (px) of stage 1 alone
-        self.cv_err = None      # held-out error (px) of the final model
-
-    @staticmethod
-    def _expand(Z, kind):
-        ix, iy = Z[:, 0], Z[:, 1]
-        cols = [np.ones(len(Z)), Z]
-        if kind in ("quad", "cubic"):
-            cols += [ix * ix, iy * iy, ix * iy]
-        if kind == "cubic":
-            cols += [ix ** 3, iy ** 3, ix * ix * iy, ix * iy * iy]
-        return np.column_stack(cols)
-
-    @staticmethod
-    def _solve(X, y, alpha):
-        reg = np.eye(X.shape[1]) * alpha * len(X)
-        reg[0, 0] = 0.0
-        return np.linalg.solve(X.T @ X + reg, X.T @ y)
-
-    def _oof(self, X, y, groups, ids, alpha):
-        """Out-of-fold prediction for every sample (each group predicted by a model that never saw it)."""
-        out = np.empty(len(y))
-        for g in ids:
-            te = groups == g
-            out[te] = X[te] @ self._solve(X[~te], y[~te], alpha)
-        return out
-
-    @staticmethod
-    def _bin(P, R, scale, cell):
-        key = np.floor(P / (cell * scale)).astype(int)
-        _, inv = np.unique(key, axis=0, return_inverse=True)
-        inv = inv.ravel()
-        cnt = np.bincount(inv).astype(float)
-        cen = np.stack([np.bincount(inv, P[:, k]) / cnt for k in (0, 1)], 1)
-        res = np.stack([np.bincount(inv, R[:, k]) / cnt for k in (0, 1)], 1)
-        return dict(cen=cen, res=res, cnt=cnt)
-
-    @staticmethod
-    def _field(P, f, scale):
-        d = (P[:, None, :] - f["cen"][None]) / (f["sigma"] * scale)
-        k = np.exp(-0.5 * (d ** 2).sum(-1)) * f["cnt"][None]
-        return (k @ f["res"]) / (k.sum(1, keepdims=True) + f["lam"])
-
-    def fit(self, F, S, groups=None, scale=None):
-        F, S = np.asarray(F, float), np.asarray(S, float)
-        if scale is not None:
-            self.scale = np.asarray(scale, float)
-        self.mu = F.mean(0)
-        self.sd = F.std(0) + 1e-9
-        Z = (F - self.mu) / self.sd
-        groups = np.zeros(len(F), int) if groups is None else np.asarray(groups)
-        ids = np.unique(groups)
-        can_cv = len(ids) >= 6
-        self.axes, self.field, self.cv_base, self.cv_err = [], None, None, None
-        n_feat = Z.shape[1]
-        masks = [[c for c in m if c < n_feat] for m in self.MASKS]
-        if not can_cv:
-            masks = masks[-1:]
-        pick = None
-        for cols in masks:
-            Zm = Z[:, cols]
-            axes_, oof_, total = [], np.zeros_like(S), 0.0
-            for ax in (0, 1):
-                y = S[:, ax]
-                kind, alpha = "quad", RIDGE
-                if can_cv:
-                    best = None
-                    for k_ in self.KINDS:
-                        X = self._expand(Zm, k_)
-                        for a in self.ALPHAS:
-                            p = self._oof(X, y, groups, ids, a)
-                            sc = float(np.mean((p - y) ** 2))
-                            if best is None or sc < best[0]:
-                                best = (sc, k_, a, p)
-                    total += best[0]
-                    _, kind, alpha, oof_[:, ax] = best
-                axes_.append(dict(kind=kind, alpha=alpha,
-                                  W=self._solve(self._expand(Zm, kind), y, alpha)))
-            if pick is None or total < pick[0]:
-                pick = (total, cols, axes_, oof_)
-        _, self.cols, self.axes, oof = pick
-        if not can_cv:
-            return
-
-        def group_err(P):
-            return float(np.mean([np.sqrt(np.mean(np.sum((P[groups == g] - S[groups == g]) ** 2, 1)))
-                                  for g in ids]))
-
-        self.cv_base = self.cv_err = group_err(oof)
-        R = S - oof
-        best = None
-        for sg in self.SIGMAS:
-            for lam in self.LAMBDAS:
-                P2 = oof.copy()
-                for g in ids:
-                    te = groups == g
-                    f = self._bin(oof[~te], R[~te], self.scale, self.CELL)
-                    f.update(sigma=sg, lam=lam)
-                    P2[te] = oof[te] + self._field(oof[te], f, self.scale)
-                e = group_err(P2)
-                if best is None or e < best[0]:
-                    best = (e, sg, lam)
-        if best[0] < 0.97 * self.cv_base:
-            self.field = self._bin(oof, R, self.scale, self.CELL)
-            self.field.update(sigma=best[1], lam=best[2])
-            self.cv_err = best[0]
-
-    def predict(self, f):
-        z = ((np.asarray(f, float)[None, :] - self.mu) / self.sd)[:, self.cols]
-        p = np.array([(self._expand(z, a["kind"]) @ a["W"])[0] for a in self.axes])
-        if self.field is not None:
-            p = p + self._field(p[None, :], self.field, self.scale)[0]
-        return p
-
-    @property
-    def ready(self):
-        return self.axes is not None
-
-    @property
-    def summary(self):
-        s = "/".join(f"{a['kind']}@{a['alpha']:g}" for a in self.axes) if self.axes else ""
-        if self.axes:
-            s += " head-pos" if len(self.cols) > 3 else " no-head-pos"
-        if self.field is not None:
-            s += f" +field(s={self.field['sigma']:g})"
-        return s
-
-    def to_dict(self):
-        fld = None
-        if self.field is not None:
-            fld = dict(cen=self.field["cen"].tolist(), res=self.field["res"].tolist(),
-                       cnt=self.field["cnt"].tolist(), sigma=self.field["sigma"], lam=self.field["lam"])
-        return dict(mu=self.mu.tolist(), sd=self.sd.tolist(), cols=list(self.cols), scale=self.scale.tolist(),
-                    cv_err=self.cv_err, cv_base=self.cv_base, field=fld,
-                    axes=[dict(kind=a["kind"], alpha=a["alpha"], W=a["W"].tolist()) for a in self.axes])
-
-    def from_dict(self, d):
-        axes = [dict(kind=a["kind"], alpha=a["alpha"], W=np.array(a["W"])) for a in d["axes"]]
-        fld = d.get("field")
-        if fld is not None:
-            fld = dict(cen=np.array(fld["cen"]), res=np.array(fld["res"]), cnt=np.array(fld["cnt"]),
-                       sigma=fld["sigma"], lam=fld["lam"])
-        self.mu, self.sd = np.array(d["mu"]), np.array(d["sd"])
-        self.cols = d.get("cols", list(range(len(self.mu))))
-        self.scale = np.array(d["scale"])
-        self.axes, self.field = axes, fld
-        self.cv_err, self.cv_base = d.get("cv_err"), d.get("cv_base")
-
-
 def extract(result, W, H):
     """Turn a FaceLandmarker result into gaze features plus drawing info."""
     if not result.face_landmarks:
@@ -429,21 +183,32 @@ def extract(result, W, H):
     r_px = max(e["r"] for e in eyes)
     dist_cm = focal_px * (IRIS_DIAMETER_MM / 2) / max(r_px, 1e-3) / 10
     blink = 0.0
+    bs_h = bs_up = bs_down = 0.0
     if result.face_blendshapes:
         bs = {c.category_name: c.score for c in result.face_blendshapes[0]}
         blink = (bs.get("eyeBlinkLeft", 0) + bs.get("eyeBlinkRight", 0)) / 2
+        g = bs.get
+        # eyeLook*: how far each eye looks in/out/up/down, learned from the whole eye image
+        bs_h = ((g("eyeLookInLeft", 0) + g("eyeLookOutRight", 0)) - (g("eyeLookOutLeft", 0) + g("eyeLookInRight", 0))) / 2
+        bs_up = (g("eyeLookUpLeft", 0) + g("eyeLookUpRight", 0)) / 2
+        bs_down = (g("eyeLookDownLeft", 0) + g("eyeLookDownRight", 0)) / 2
 
-    return dict(feat=np.array([ix, iy, op, hx, hy, tx, ty, tz, roll]), ix=ix, iy=iy, eyes=eyes, pts=pts,
+    # iris offset in the HEAD frame: the 3D eye-corner -> iris vector rotated by the inverse head rotation,
+    # so head yaw/pitch no longer mix into the iris signal (needs the face transform matrix)
+    ih = np.zeros(3)
+    if result.facial_transformation_matrixes:
+        Rm = np.asarray(result.facial_transformation_matrixes[0])[:3, :3]
+        Rm = Rm / (np.linalg.norm(Rm, axis=0) + 1e-9)
+        zs = np.array([p.z for p in lms]) * W
+        for e, spec in zip(eyes, EYES):
+            dz = zs[list(spec["iris"])].mean() - zs[list(spec["corners"])].mean()
+            d_gl = np.array([e["iris"][0] - e["c"][0], -(e["iris"][1] - e["c"][1]), -dz])   # image -> OpenGL axes
+            ih += (Rm.T @ d_gl) / e["w"] * (e["w"] / wsum)
+
+    return dict(feat=np.array([ix, iy, op, hx, hy, tx, ty, tz, roll, bs_h, bs_up, bs_down, *ih]), ix=ix, iy=iy, eyes=eyes, pts=pts,
                 hx=hx, hy=hy, tx=tx, ty=ty, tz=tz, roll=roll, dist_cm=dist_cm, blink=blink)
 
 
-def robust_filter(F):
-    """Drop frames whose iris features are far from the per-dot median (saccades, glitches)."""
-    F = np.asarray(F)
-    med = np.median(F, axis=0)
-    mad = np.median(np.abs(F - med), axis=0) * 1.4826 + 1e-6
-    keep = np.all(np.abs(F[:, :2] - med[:2]) <= 3 * mad[:2], axis=1)
-    return F[keep]
 
 
 def put(img, text, org, scale=0.5, color=C_WHITE, thick=1, bg=None):
@@ -473,6 +238,15 @@ class CursorDriver(threading.Thread):
             self._pos = np.array(self.mouse.position, dtype=float)
         self.enabled = on
 
+    def jump(self, x, y):
+        """Place the OS cursor at (x, y) immediately (used by recenter)."""
+        self._pos = np.array([x, y], dtype=float)
+        self.target = (float(x), float(y))
+        try:
+            self.mouse.position = (int(x), int(y))
+        except Exception:
+            pass
+
     def run(self):
         period = 1.0 / CURSOR_HZ
         while self.alive:
@@ -495,20 +269,35 @@ class App:
     DBG = "Eye Tracker - debug"
     CAL = "Eye Tracker - calibration"
 
-    def __init__(self, cam_index):
+    def __init__(self, cam_index, voice=True, fixation=True, online_refine=False):
+        self.voice = Speaker(enabled=voice)
         self.sw, self.sh, self.width_mm = screen_info()
         self.pool_F, self.pool_S, self.pool_G = [], [], []   # training data pooled over all rounds
         self.pool_K, self.pool_V = [], []                    # kind ('eye'/'head') and visit id per chunk
+        self.pool_T, self.pool_P, self.pool_R = [], [], []   # time, phase code, round per chunk
+        self.session_path = None
+        self.contig_groups = set()                           # group ids that are consecutive time blocks
         self.headcomp = HeadComp()
         self._gid, self.rounds, self.history = 0, 0, []
         self.px_per_mm = (self.sw / self.width_mm) if self.width_mm else None
 
-        self.cap = cv2.VideoCapture(cam_index, cv2.CAP_DSHOW)
-        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAM_W)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAM_H)
-        self.cap.set(cv2.CAP_PROP_FPS, CAM_FPS)
-        if not self.cap.isOpened():
+        # MSMF delivers 30 fps at 1280x720 here; DirectShow gave only ~10 fps at that size (measured),
+        # which means 3x fewer calibration samples and 3x more lag. DirectShow stays as the fallback.
+        self.cap = None
+        for backend in (cv2.CAP_MSMF, cv2.CAP_DSHOW):
+            cap = cv2.VideoCapture(cam_index, backend)
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+            cap.set(cv2.CAP_PROP_FRAME_WIDTH, CAM_W)
+            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, CAM_H)
+            cap.set(cv2.CAP_PROP_FPS, CAM_FPS)
+            # Camera drivers REMEMBER exposure settings across programs: a tool that left manual exposure
+            # on made the image nearly black (brightness 30/255) and the iris signal vanish. Force auto.
+            cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.75)
+            if cap.isOpened() and cap.read()[0]:
+                self.cap = cap
+                break
+            cap.release()
+        if self.cap is None:
             raise SystemExit(f"Could not open camera {cam_index}")
 
         opts = vision.FaceLandmarkerOptions(
@@ -522,7 +311,14 @@ class App:
         self.last_ts = -1
 
         self.model = GazeModel()
+        self.prior = load_prior(PRIOR_PATH)
         self.filter = OneEuro(ONE_EURO_MIN_CUTOFF, ONE_EURO_BETA, ONE_EURO_D_CUTOFF)
+        k = self.sw / 1920.0
+        self.fixation = (FixationHold(FIX_V_ENTER * k, FIX_V_EXIT * k, FIX_RADIUS * k, FIX_MIN_S)
+                         if fixation else None)
+        self.refiner = OnlineRefiner(self.sw, self.sh) if online_refine else None   # OFF unless --online-refine
+        self.raw0 = None        # latest raw prediction before the online correction
+        self.offset = np.zeros(2)   # recenter zero-point shift (px), see recenter(); per sitting, never saved
         self.cursor = CursorDriver(self.sw, self.sh)
         self.cursor.start()
 
@@ -543,6 +339,7 @@ class App:
         self.fps = 0.0
         self.calib_err = None
         self.valid_stats = None
+        self.posture_stats = None
         self.message = ""
         self.message_until = 0
         self.dbg_open = False
@@ -550,6 +347,7 @@ class App:
         self.cal_bg[:] = C_DARK
 
         if self._load_calibration():
+            self._load_session()
             self.state = "run"
             self.flash("Loaded saved calibration. F7 = cursor on/off, F8 = recalibrate", 8)
         else:
@@ -558,14 +356,54 @@ class App:
     # ------------------------------------------------------------------ input
     def _on_global_key(self, key):
         names = {pkeyboard.Key.f6: "talk", pkeyboard.Key.f7: "toggle", pkeyboard.Key.f8: "calib", pkeyboard.Key.f9: "valid",
-                 pkeyboard.Key.f10: "quit", pkeyboard.Key.f11: "refine", pkeyboard.Key.space: "space", pkeyboard.Key.esc: "esc"}
+                 pkeyboard.Key.f10: "quit", pkeyboard.Key.f11: "refine", pkeyboard.Key.f4: "recenter", pkeyboard.Key.f12: "posture", pkeyboard.Key.space: "space", pkeyboard.Key.esc: "esc"}
         if key in names:
             self.keys.put(names[key])
+
+    def _reset_filters(self):
+        self.filter.reset()
+        if self.fixation is not None:
+            self.fixation.reset()
 
     def flash(self, msg, seconds=4):
         self.message, self.message_until = msg, time.time() + seconds
 
     # ------------------------------------------------------------------ persistence
+    def _save_session(self):
+        """Write every raw sample of this session to eye-track/sessions/ (see samples.py)."""
+        if not self.pool_F:
+            return
+        if self.session_path is None:
+            self.session_path = sessions.new_path()
+        try:
+            sessions.save(self.session_path, self._pool_arrays(),
+                          dict(screen=[self.sw, self.sh], features=GazeModel.FEATURES, rounds=self.rounds,
+                               mediapipe=getattr(mp, "__version__", "?"), history_px=self.history))
+        except Exception as e:                       # never break calibration over a disk problem
+            print("could not save session:", e)
+
+    def _load_session(self):
+        """Restore the newest saved session into the pool, so F11 can add rounds after a restart."""
+        path = sessions.latest()
+        if not path:
+            return False
+        try:
+            A, meta = sessions.load(path)
+            if meta.get("screen") != [self.sw, self.sh] or A["F"].shape[1] != len(GazeModel.FEATURES):
+                return False
+            self.pool_F, self.pool_S, self.pool_G = [A["F"]], [A["S"]], [A["G"]]
+            self.pool_V, self.pool_K, self.pool_T = [A["V"]], [A["K"]], [A["T"]]
+            self.pool_P, self.pool_R = [A["PH"]], [A["R"]]
+            self.contig_groups = set(int(g) for g in np.unique(A["G"][A["C"]]))
+            self._gid = int(max(A["G"].max(), A["V"].max())) + 2
+            self.rounds = int(meta.get("rounds", A["R"].max()))
+            self.history = list(meta.get("history_px", []))
+            self.session_path = path
+            return True
+        except Exception as e:
+            print("could not load session:", e)
+            return False
+
     def _save_calibration(self):
         d = dict(model=self.model.to_dict(), headcomp=self.headcomp.to_dict(), screen=[self.sw, self.sh],
                  iris_range=[list(map(float, r)) for r in self.iris_range] if self.iris_range else None,
@@ -626,11 +464,24 @@ class App:
             return  # hold position through blinks
         raw = self.gaze(info["feat"])
         raw = np.clip(raw, [-0.05 * self.sw, -0.05 * self.sh], [1.05 * self.sw, 1.05 * self.sh])
+        raw = raw + self.offset                  # recenter zero-point
+        self.raw0 = raw
+        if self.refiner is not None:
+            raw = raw + self.refiner.correction(raw)
         self.raw = raw
         self.smooth = self.filter(raw, now)
-        self.gaze_trail.append(tuple(self.smooth))
-        self.cursor.target = (float(np.clip(self.smooth[0], 0, self.sw - 1)),
-                              float(np.clip(self.smooth[1], 0, self.sh - 1)))
+        out = self.smooth
+        if self.fixation is not None:
+            out, _ = self.fixation.update(self.smooth, now)     # pin the cursor during fixations
+        self.gaze_trail.append(tuple(out))
+        self.cursor.target = (float(np.clip(out[0], 0, self.sw - 1)),
+                              float(np.clip(out[1], 0, self.sh - 1)))
+
+    def register_click(self, x, y):
+        """Call when the user clicks at a location that is independent of the gaze cursor (see
+        OnlineRefiner). Only does anything with --online-refine. Respects inputs_paused."""
+        if self.refiner is not None and self.raw0 is not None and not self.inputs_paused:
+            self.refiner.update(self.raw0, (x, y))
 
     # ------------------------------------------------------------------ windows
     def open_debug(self, canvas_shape):
@@ -666,15 +517,16 @@ class App:
             pass
 
     # ------------------------------------------------------------------ target sequences
-    def run_targets(self, points, mode):
+    def run_targets(self, points, mode, title=None, sub=None):
         """Show dots one by one. mode='calib' collects features, mode='valid' collects predictions.
-        Returns list of (target_px, samples) or None if cancelled."""
+        Returns list of (target_px, samples, times) or None if cancelled."""
         self.open_fullscreen()
         was_enabled = self.cursor.enabled
         self.cursor.set_enabled(False)
-        title = "CALIBRATION" if mode == "calib" else "ACCURACY CHECK"
-        sub = ("Keep your head still and follow the dot with your EYES only."
+        title_ = "CALIBRATION" if mode == "calib" else "ACCURACY CHECK"
+        sub_ = ("Keep your head still and follow the dot with your EYES only."
                if mode == "calib" else "Look at each dot. This measures how accurate tracking is.")
+        title, sub = title or title_, sub or sub_
 
         if not self._intro(title, sub):
             self.close_fullscreen()
@@ -684,7 +536,7 @@ class App:
         out = []
         for (px, py) in points:
             target = np.array([px * self.sw, py * self.sh])
-            samples = []
+            samples, times = [], []
             t0 = time.time()
             while True:
                 now = time.time()
@@ -694,6 +546,7 @@ class App:
                 collecting = el >= SETTLE_S
                 if collecting and good:
                     samples.append(info["feat"])    # raw features; predictions are made later
+                    times.append(now)
                 done = collecting and el >= SETTLE_S + COLLECT_S and len(samples) >= MIN_SAMPLES
                 if done or el > SETTLE_S + COLLECT_S + 4.0:
                     break
@@ -718,12 +571,13 @@ class App:
                     self.close_fullscreen()
                     self.cursor.set_enabled(was_enabled)
                     return None
-            out.append((target, samples))
+            out.append((target, samples, times))
         self.cursor.set_enabled(was_enabled)
         return out
 
     def _intro(self, title, sub):
-        """Intro screen with a camera preview. True on SPACE, False on ESC."""
+        """Intro screen with a camera preview. True on SPACE, False on ESC. Read aloud."""
+        self.voice.say(f"{title.title()}. {sub} Press space to start, or escape to cancel.")
         while True:
             frame, info = self.grab()
             img = self.cal_bg.copy()
@@ -768,9 +622,11 @@ class App:
         """Raw feature vector -> screen px (head compensation, then the eye model)."""
         return self.model.predict(self.headcomp.apply(feat))
 
-    def _pool_add(self, F, S, g, kind="eye", v=None):
+    def _pool_add(self, F, S, g, kind="eye", v=None, contiguous=False, T=None, phase="dots"):
         """Append samples to the training pool. g = local group ids (CV groups), v = local visit ids
-        (head phase: one per static dot). kind = 'eye' (head still) or 'head' (static target, head moving)."""
+        (head phase: one per static dot). kind = 'eye' (head still) or 'head' (static target, head moving).
+        contiguous = the groups are consecutive time blocks (neighbours are excluded from training when
+        one is held out in cross-validation)."""
         F, S, g = np.asarray(F, float), np.asarray(S, float), np.asarray(g, int)
         if len(F) == 0:
             return
@@ -779,43 +635,54 @@ class App:
         g = g - g.min() + base
         v = v - v.min() + base
         self._gid = int(max(g.max(), v.max())) + 1
+        if contiguous:
+            self.contig_groups.update(int(x) for x in np.unique(g))
+            self._gid += 1          # keep the next chunk from looking adjacent
         self.pool_F.append(F)
         self.pool_S.append(S)
         self.pool_G.append(g)
         self.pool_V.append(v)
         self.pool_K.append(np.full(len(F), kind == "head"))
+        self.pool_T.append(np.zeros(len(F)) if T is None else np.asarray(T, float))
+        self.pool_P.append(np.full(len(F), sessions.PHASES.index(phase), np.int8))
+        self.pool_R.append(np.full(len(F), self.rounds, np.int16))
 
-    def _pool_add_dots(self, res):
-        """res = [(target_px, [feature vectors])]. Returns number of usable dots."""
-        F, S, G, n = [], [], [], 0
-        for target, samples in res:
+    def _pool_add_dots(self, res, phase="dots"):
+        """res = [(target_px, [feature vectors], [times])]. Returns number of usable dots."""
+        F, S, G, T, n = [], [], [], [], 0
+        for target, samples, times in res:
             if len(samples) < 5:
                 continue
-            kept = robust_filter(samples)
-            F.extend(kept)
-            S.extend([target] * len(kept))
-            G.extend([n] * len(kept))
+            samples = np.asarray(samples)
+            keep = robust_mask(samples)
+            F.extend(samples[keep])
+            T.extend(np.asarray(times)[keep])
+            S.extend([target] * int(keep.sum()))
+            G.extend([n] * int(keep.sum()))
             n += 1
         if n:
-            self._pool_add(F, S, G)
+            self._pool_add(F, S, G, T=T, phase=phase)
         return n
 
-    def refit(self):
-        F, S, G = np.vstack(self.pool_F), np.vstack(self.pool_S), np.concatenate(self.pool_G)
-        V, K = np.concatenate(self.pool_V), np.concatenate(self.pool_K)
-        if K.any() and (~K).any():
-            self.headcomp.fit(F[K], V[K], F[~K])
-        else:
-            self.headcomp = HeadComp()
-            if (~K).any():
-                self.headcomp.ref = F[~K][:, HeadComp.COLS].mean(0)
-        self.model.fit(self.headcomp.apply_many(F), S, G, (self.sw, self.sh))
+    def _pool_arrays(self):
+        cat = np.concatenate
+        G = cat(self.pool_G)
+        return dict(F=np.vstack(self.pool_F), S=np.vstack(self.pool_S), G=G, V=cat(self.pool_V),
+                    K=cat(self.pool_K), T=cat(self.pool_T), PH=cat(self.pool_P), R=cat(self.pool_R),
+                    C=np.isin(G, list(self.contig_groups)))
+
+    def refit(self, nested=False):
+        A = self._pool_arrays()
+        F, S, G = A["F"], A["S"], A["G"]
+        self.headcomp, self.model = fit_pool(A, (self.sw, self.sh), nested=nested, model=self.model,
+                                             prior=self.prior)
         self.iris_range = (F[:, :2].min(0), F[:, :2].max(0))
         sub = slice(None, None, max(1, len(F) // 400))
         pred = np.array([self.gaze(f) for f in F[sub]])
         self.calib_err = float(np.sqrt(np.mean(np.sum((pred - S[sub]) ** 2, 1))))
-        self.filter.reset()
+        self._reset_filters()
         self._save_calibration()
+        self._save_session()
 
     # ------------------------------------------------------------------ head-movement phase
     def run_headphase(self):
@@ -830,8 +697,9 @@ class App:
             self.close_fullscreen()
             self.cursor.set_enabled(was_enabled)
             return None
-        F, S, G, V = [], [], [], []
+        F, S, G, V, T = [], [], [], [], []
         lead = 1.5
+        spoken = None
         for vi, (px, py) in enumerate(HEAD_POINTS):
             target = np.array([px * self.sw, py * self.sh])
             tx, ty = int(target[0]), int(target[1])
@@ -848,16 +716,24 @@ class App:
                     cv2.circle(img, (tx, ty), int(12 + 40 * (-t / lead)), C_WHITE, 2, cv2.LINE_AA)
                     cv2.circle(img, (tx, ty), 6, C_WHITE, -1, cv2.LINE_AA)
                     prompt = "Look at the dot..."
+                    if spoken != ("lead", vi):
+                        spoken = ("lead", vi)
+                        self.voice.say("Look at the dot, and keep your eyes on it.")
                 else:
                     if good:
                         seg = int(t // HEAD_PROMPT_S)
                         F.append(info["feat"])
+                        T.append(time.time())
                         S.append(target)
                         G.append(vi * 100 + seg)
                         V.append(vi)
                     cv2.circle(img, (tx, ty), 14, C_GREEN, -1, cv2.LINE_AA)
                     cv2.circle(img, (tx, ty), 3, (0, 0, 0), -1, cv2.LINE_AA)
-                    prompt = HEAD_PROMPTS[min(int(t // HEAD_PROMPT_S), len(HEAD_PROMPTS) - 1)]
+                    pi = min(int(t // HEAD_PROMPT_S), len(HEAD_PROMPTS) - 1)
+                    prompt = HEAD_PROMPTS[pi]
+                    if spoken != (vi, pi):
+                        spoken = (vi, pi)
+                        self.voice.say(prompt)
                     cv2.rectangle(img, (0, self.sh - 8), (int(self.sw * t / HEAD_S), self.sh), C_GREEN, -1)
                 put(img, prompt, (self.sw // 2 - 380, int(self.sh * 0.1)), 1.3, C_YELLOW, 3)
                 put(img, "keep your EYES on the dot", (self.sw // 2 - 200, int(self.sh * 0.1) + 50), 0.8, C_GRAY, 2)
@@ -874,7 +750,7 @@ class App:
         if len(F) < 200:
             self.flash("Head phase failed: face not tracked enough.", 8)
             return None
-        return np.array(F), np.array(S), np.array(G), np.array(V)
+        return np.array(F), np.array(S), np.array(G), np.array(V), np.array(T)
 
     # ------------------------------------------------------------------ moving-dot pursuit
     @staticmethod
@@ -890,29 +766,37 @@ class App:
         y = 0.5 + 0.43 * math.sin(2 * math.pi * PURSUIT_FY * tau + 2.1 * ph + 0.6)
         return np.array([x * self.sw, y * self.sh])
 
-    def run_pursuit(self, rnd):
+    def run_pursuit(self, rnd, mixed=False, lag_hint=None):
         """Follow a moving dot for PURSUIT_S seconds. Returns (F, S, G, lag) or None if cancelled.
         Eyes trail the dot by roughly 100-250 ms, so the lag is estimated from the data: the lag at
         which a simple fit of features -> dot position has the smallest error."""
         self.open_fullscreen()
         was_enabled = self.cursor.enabled
         self.cursor.set_enabled(False)
-        msg = f"Follow the moving dot smoothly with your EYES only, head still ({PURSUIT_S:.0f} s)."
-        if not self._intro("MOVING DOT", msg):
+        dur = MIXED_S if mixed else PURSUIT_S
+        rnd = rnd + (0.5 if mixed else 0.0)          # a different path from the head-still pursuit
+        msg = (f"Follow the moving dot with your eyes, and also move your head freely and naturally: "
+               f"nod, turn, lean ({dur:.0f} seconds)." if mixed else
+               f"Follow the moving dot smoothly with your EYES only, head still ({dur:.0f} s).")
+        if not self._intro("MOVING DOT, HEAD FREE" if mixed else "MOVING DOT", msg):
             self.close_fullscreen()
             self.cursor.set_enabled(was_enabled)
             return None
         rec = []
         t0 = time.time()
         lead = 2.0                                   # stationary "get ready" phase
+        started = False
         while True:
             el = time.time() - t0
-            if el >= lead + PURSUIT_S:
+            if el >= lead + dur:
                 break
             frame, info = self.grab()
             t = el - lead
             pos = self._traj(self._warp(max(t, 0.0)), rnd)
             good = info is not None and info["blink"] < BLINK_THRESH and not self.talking
+            if t >= 0 and not started:
+                started = True
+                self.voice.say("Go. Follow the dot, and move your head naturally." if mixed else "Go. Follow the dot with your eyes.")
             if t >= 0 and good:
                 rec.append((t, info["feat"]))
             img = self.cal_bg.copy()
@@ -923,7 +807,7 @@ class App:
             else:
                 cv2.circle(img, (tx, ty), 14, C_GREEN, -1, cv2.LINE_AA)
                 cv2.circle(img, (tx, ty), 3, (0, 0, 0), -1, cv2.LINE_AA)
-                cv2.rectangle(img, (0, self.sh - 8), (int(self.sw * t / PURSUIT_S), self.sh), C_GREEN, -1)
+                cv2.rectangle(img, (0, self.sh - 8), (int(self.sw * t / dur), self.sh), C_GREEN, -1)
             if info is None:
                 put(img, "FACE NOT DETECTED", (self.sw // 2 - 200, int(self.sh * 0.18)), 1.2, C_RED, 3)
             cv2.imshow(self.CAL, img)
@@ -942,7 +826,7 @@ class App:
         Z = (Fm - Fm.mean(0)) / (Fm.std(0) + 1e-9)
         X = np.column_stack([np.ones(len(Z)), Z])
         best = None
-        for lag in PURSUIT_LAGS:
+        for lag in (PURSUIT_LAGS if lag_hint is None else [lag_hint]):
             S = np.array([self._traj(self._warp(max(t - lag, 0.0)), rnd) for t in ts])
             W = GazeModel._solve(X, S, 1e-3)
             r = np.linalg.norm(X @ W - S, axis=1)
@@ -953,7 +837,7 @@ class App:
         keep = r <= np.quantile(r, 0.9)              # drop catch-up saccades / blink aftermath
         keep &= ts >= 0.5
         G = (ts // 2.0).astype(int)                  # 2 s segments = CV groups
-        return Fm[keep], S[keep], G[keep], float(lag)
+        return Fm[keep], S[keep], G[keep], float(lag), (t0 + lead + ts)[keep]
 
     # ------------------------------------------------------------------ measuring
     def _measure(self):
@@ -962,7 +846,7 @@ class App:
         if res is None:
             return None
         rows = []
-        for target, feats in res:
+        for target, feats, _ in res:
             if len(feats) < 3:
                 continue
             P = np.array([self.gaze(f) for f in feats])
@@ -985,6 +869,7 @@ class App:
     def _results_screen(self, rows, stats, footer, extra=(), timeout=None):
         """Draw the accuracy result. Returns 'next' (SPACE), 'stop' (ESC) or 'calib' (F8)."""
         acc, prec = stats["acc_px"], stats["prec_px"]
+        self.voice.say(f"Accuracy check done. Mean error {acc:.0f} pixels. {footer.split('|')[0].replace(' = ', ' for ').strip()}")
         t0 = time.time()
         while timeout is None or time.time() - t0 < timeout:
             img = self.cal_bg.copy()
@@ -1027,9 +912,13 @@ class App:
         error is below TARGET_PX (or MAX_ROUNDS / ESC). Each round = a moving dot (eyes only, head
         still) + a static dot (head only, eyes fixed); round 1 also does the 25 dots. Each accuracy
         check's own points are added to the pool afterwards."""
+        self.offset = np.zeros(2)               # a new model has a new zero-point
         if fresh or not self.pool_F:
             self.pool_F, self.pool_S, self.pool_G, self._gid, self.rounds = [], [], [], 0, 0
             self.pool_K, self.pool_V = [], []
+            self.pool_T, self.pool_P, self.pool_R = [], [], []
+            self.contig_groups = set()
+            self.session_path = sessions.new_path()
             self.history = []
         first = not self.pool_F
         done_rounds = 0
@@ -1039,7 +928,7 @@ class App:
                 done_rounds += 1
                 if first:
                     res = self.run_targets(CALIB_POINTS, "calib")
-                    if res is None or self._pool_add_dots(res) < 12:
+                    if res is None or self._pool_add_dots(res, "dots") < 12:
                         self.flash("Calibration cancelled or face not tracked on enough dots", 6)
                         return
                     first = False
@@ -1049,14 +938,20 @@ class App:
                     if self.pool_F:
                         self.refit()        # keep what the dots gave us
                     return
-                F, S, G, lag = pur
-                self._pool_add(F, S, G)
+                F, S, G, lag, T = pur
+                self._pool_add(F, S, G, contiguous=True, T=T, phase="pursuit")
+                # 1b) EYES + free HEAD motion: the moving dot while the head moves naturally
+                mix = self.run_pursuit(self.rounds, mixed=True, lag_hint=lag)
+                if mix is None:
+                    self.refit()
+                    return
+                self._pool_add(mix[0], mix[1], mix[2], contiguous=True, T=mix[4], phase="mixed")
                 # 2) HEAD only, eyes fixed on a static dot: closer / tilt / spin / back / nod
                 head = self.run_headphase()
                 if head is None:
                     self.refit()
                     return
-                self._pool_add(*head[:3], kind="head", v=head[3])
+                self._pool_add(*head[:3], kind="head", v=head[3], contiguous=True, T=head[4], phase="head")
                 self.refit()
                 r2 = self.headcomp.r2
                 print(f"[round {self.rounds}] pursuit lag {lag * 1000:.0f} ms, pool "
@@ -1072,11 +967,12 @@ class App:
                 self.history.append(stats["acc_px"])
                 reached = stats["acc_px"] < TARGET_PX
                 # the accuracy check's own points become training data for the next fit
-                self._pool_add_dots(res)
-                self.refit()
-                cv = self.model.cv_err
+                self._pool_add_dots(res, "valid")
+                self.refit(nested=True)     # final fit of the round: also compute the honest nested-CV error
+                cv = self.model.cv_nested or self.model.cv_err
+                print(f"[round {self.rounds}] selection-CV {self.model.cv_err}, nested-CV {self.model.cv_nested}")
                 extra = [("rounds: " + "  ->  ".join(f"{h:.0f}px" for h in self.history), C_WHITE),
-                         (f"model now: {self.model.summary}   held-out {cv:.0f}px" if cv else
+                         (f"model now: {self.model.summary}   held-out (nested CV) {cv:.0f}px" if cv else
                           f"model now: {self.model.summary}", C_GRAY)]
                 if reached:
                     footer = f"TARGET REACHED (< {TARGET_PX:.0f}px).  SPACE = finish"
@@ -1092,11 +988,116 @@ class App:
         finally:
             self.close_fullscreen()
             self.state = "run" if self.model.ready else "idle"
-            self.filter.reset()
+            self._reset_filters()
             if self.model.ready and done_rounds:
                 self.cursor.set_enabled(True)
                 self.flash(f"Tuned in {done_rounds} round(s): last error {self.history[-1]:.0f}px"
                            if self.history else "Calibrated", 10)
+
+    def recenter(self):
+        """Look at the dot in the middle of the screen and press F4: the cursor jumps to the center and the gaze
+        zero-point is shifted so that where you are looking right now maps to the center. Fixes the constant
+        offset that builds up when you shift in your seat or the screen/camera moves a little. Does not retrain
+        anything; the shift is per sitting (it is reset by calibration and never saved)."""
+        if not self.model.ready:
+            self.flash("Calibrate first (F8)", 4)
+            return
+        c = np.array([self.sw / 2.0, self.sh / 2.0])
+        self.open_fullscreen()
+        was_enabled = self.cursor.enabled
+        self.cursor.set_enabled(False)
+        self.voice.say("Recenter. Look at the dot in the middle of the screen.")
+        settle, collect = 1.0, 1.2
+        P, t0, ok = [], time.time(), False
+        try:
+            while True:
+                el = time.time() - t0
+                frame, info = self.grab()
+                if el >= settle and info is not None and info["blink"] < BLINK_THRESH and not self.talking:
+                    P.append(self.gaze(info["feat"]))
+                if el >= settle + collect:
+                    ok = len(P) >= 8
+                    break
+                if el > settle + collect + 4.0:
+                    break
+                img = self.cal_bg.copy()
+                rad = int(12 + 40 * max(0.0, 1 - el / settle))
+                cv2.circle(img, (int(c[0]), int(c[1])), rad, C_WHITE, 2, cv2.LINE_AA)
+                cv2.circle(img, (int(c[0]), int(c[1])), 12, C_GREEN if el >= settle else C_WHITE, -1, cv2.LINE_AA)
+                put(img, "RECENTER: look at the dot", (self.sw // 2 - 230, int(self.sh * 0.2)), 1.1, C_CYAN, 3)
+                if info is None:
+                    put(img, "FACE NOT DETECTED", (self.sw // 2 - 200, int(self.sh * 0.3)), 1.2, C_RED, 3)
+                cv2.imshow(self.CAL, img)
+                k = cv2.waitKey(1) & 0xFF
+                if k == 27 or "esc" in self._drain_keys():
+                    self.flash("Recenter cancelled", 3)
+                    return
+            if not ok:
+                self.flash("Recenter failed: face not tracked, try again", 5)
+                return
+            off = c - np.median(P, axis=0)                              # gaze() has no offset, so P is raw
+            lim = np.array([0.4 * self.sw, 0.4 * self.sh])
+            self.offset = np.clip(off, -lim, lim)
+            self.flash(f"Recentered (shift {self.offset[0]:+.0f}, {self.offset[1]:+.0f} px)", 6)
+            print(f"[recenter] gaze zero-point shifted by ({self.offset[0]:+.0f}, {self.offset[1]:+.0f}) px")
+        finally:
+            self.close_fullscreen()
+            self.cursor.set_enabled(was_enabled)
+            self._reset_filters()
+            self.state = "run"
+            if ok:
+                self.cursor.jump(c[0], c[1])
+                self.smooth = c.copy()
+
+    def _score(self, res):
+        """res from run_targets -> (rows, mean error px). Same scoring as the accuracy check."""
+        rows = []
+        for target, feats, _ in res:
+            if len(feats) < 3:
+                continue
+            P = np.array([self.gaze(f) for f in feats])
+            m = P.mean(0)
+            rows.append((target, m, float(np.linalg.norm(m - target)),
+                         float(np.sqrt(np.mean(np.sum((P - m) ** 2, 1))))))
+        return rows, (float(np.mean([r[2] for r in rows])) if rows else None)
+
+    def posture_check(self):
+        """Honest evaluation: look at dots after deliberately changing posture/distance. Scored in px and
+        reported SEPARATELY from the in-session accuracy check; saved to the session but never fitted."""
+        if not self.model.ready:
+            self.flash("Calibrate first (F8)", 4)
+            return
+        steps = [("POSTURE 1 OF 2", "Lean CLOSER to the screen, about ten centimeters, then look at each dot."),
+                 ("POSTURE 2 OF 2", "Sit back, shift your chair to one side and tilt your head a little, "
+                                    "then look at each dot.")]
+        results = []
+        try:
+            for title, sub in steps:
+                res = self.run_targets(POSTURE_POINTS, "valid", title=title, sub=sub)
+                if res is None:
+                    return
+                results.append(res)
+            scored = [self._score(r) for r in results]
+            if any(e is None for _, e in scored):
+                self.flash("Posture check: face not tracked well enough", 6)
+                return
+            for r in results:                                    # kept in the session file, excluded from fits
+                self._pool_add_dots(r, "posture")
+            self._save_session()
+            rows = scored[0][0] + scored[1][0]
+            errs = [e for _, e in scored]
+            stats = dict(acc_px=float(np.mean(errs)), prec_px=float(np.mean([r[3] for r in rows])))
+            base = self.valid_stats["acc_px"] if self.valid_stats else None
+            extra = [(f"posture 1 (closer): {errs[0]:.0f}px    posture 2 (shifted/tilted): {errs[1]:.0f}px", C_WHITE),
+                     ("in-session accuracy check: " + (f"{base:.0f}px" if base else "n/a")
+                      + "   (these posture errors were NOT used for fitting)", C_GRAY)]
+            print(f"[posture check] closer {errs[0]:.0f}px, shifted {errs[1]:.0f}px, in-session {base}")
+            self.posture_stats = dict(closer=errs[0], shifted=errs[1])
+            self._results_screen(rows, stats, "SPACE/ESC to continue", extra, timeout=30)
+        finally:
+            self.close_fullscreen()
+            self.state = "run"
+            self._reset_filters()
 
     def validate(self):
         if not self.model.ready:
@@ -1114,7 +1115,7 @@ class App:
             self.keys.put("calib")
         self.close_fullscreen()
         self.state = "run"
-        self.filter.reset()
+        self._reset_filters()
 
     # ------------------------------------------------------------------ debug view
     def render_debug(self, frame, info):
@@ -1264,7 +1265,7 @@ class App:
                      f"Presage: {self.talk.presage_status()}   "
                      f"lips {lt.level:.3f}/{lt.reversals}")
         put(canvas, talk_line, (10, ty + 72), 0.45, C_RED if self.talking else C_GRAY)
-        put(canvas, "F6 talk-pause on/off  F7 cursor on/off  F8 calibrate  F9 accuracy  F11 +round  F10 quit",
+        put(canvas, "F6 talk-pause on/off  F7 cursor on/off  F8 calibrate  F9 accuracy  F11 +round  F12 posture  F4 recenter  F10 quit",
             (10, ty + 98), 0.5, C_CYAN)
         if time.time() < self.message_until:
             put(canvas, self.message, (10, ty + 124), 0.5, C_YELLOW)
@@ -1284,7 +1285,7 @@ class App:
                     elif ev == "toggle":
                         if self.model.ready:
                             self.cursor.set_enabled(not self.cursor.enabled)
-                            self.filter.reset()
+                            self._reset_filters()
                         else:
                             self.flash("Calibrate first (F8)", 4)
                     elif ev == "calib":
@@ -1293,6 +1294,12 @@ class App:
                     elif ev == "refine":
                         self.state = "calib"
                         self.tune(fresh=False)
+                    elif ev == "posture":
+                        self.state = "calib"
+                        self.posture_check()
+                    elif ev == "recenter":
+                        self.state = "calib"
+                        self.recenter()
                     elif ev == "valid":
                         self.state = "valid"
                         self.validate()
@@ -1326,6 +1333,7 @@ class App:
             self.cursor.alive = False
             self.listener.stop()
             self.talk.close()
+            self.voice.close()
             self.cap.release()
             cv2.destroyAllWindows()
 
@@ -1333,7 +1341,7 @@ class App:
         ev = []
         while not self.keys.empty():
             e = self.keys.get_nowait()
-            if e in ("quit", "toggle", "calib", "valid", "talk", "refine"):
+            if e in ("quit", "toggle", "calib", "valid", "talk", "refine", "posture", "recenter"):
                 ev.append(e)
         return ev
 
@@ -1341,10 +1349,15 @@ class App:
 def main():
     ap = argparse.ArgumentParser(description="Webcam eye-tracking cursor")
     ap.add_argument("--camera", type=int, default=0, help="camera index (default 0)")
+    ap.add_argument("--no-fixation", action="store_true", help="disable the fixation hold")
+    ap.add_argument("--online-refine", action="store_true",
+                    help="EXPERIMENTAL: correct the gaze model online from App.register_click() events")
+    ap.add_argument("--no-voice", action="store_true", help="do not read calibration instructions aloud")
     args = ap.parse_args()
     if not os.path.exists(MODEL_PATH):
         raise SystemExit(f"Missing model file: {MODEL_PATH}")
-    App(args.camera).run()
+    App(args.camera, voice=not args.no_voice, fixation=not args.no_fixation,
+        online_refine=args.online_refine).run()
 
 
 if __name__ == "__main__":
