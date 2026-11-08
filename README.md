@@ -3,7 +3,8 @@
 Control your computer's mouse without your hands:
 
 - **Move the cursor with your eyes.** A webcam tracks where you look.
-- **Click by tapping your teeth.** A loudness sensor on your jaw, read by an Arduino, picks up the taps.
+- **Click by tapping your teeth.** A loudness sensor on your jaw, read by an Arduino, picks up the taps. One tap clicks, two double-click, and three open an action menu with right click, drag/select, scroll and zoom.
+- **The cursor snaps onto nearby buttons and links**, so small targets are easier to hit.
 - **Talking pauses everything.** While you speak, the cursor freezes and taps don't click, so you can talk or dictate without the mouse going off on its own. Presage SmartSpectra detects the talking, and a lip-movement detector takes over if Presage isn't available.
 
 Everything runs as one program: `python main.py`.
@@ -13,8 +14,11 @@ Everything runs as one program: `python main.py`.
 ```text
 main.py                    start the app (eye cursor + jaw clicks + talk pause)
 handsfree/
-  app.py                   eye tracking, cursor driver, calibration, debug window
-  jaw_clicker.py           jaw-tap detector + clicks (reads the Arduino over USB serial)
+  app.py                   eye tracking, cursor driver, calibration, debug window; wires it all up
+  jaw_clicker.py           jaw-tap detector (reads the Arduino over USB serial)
+  actions.py               what taps do: click, double click, action menu, drag, scroll, zoom
+  snap.py                  snapping to nearby buttons/links (Windows UI Automation)
+  overlay.py               transparent on-screen layer: menu, snap highlight, zoom view
   talk_detect.py           talking detection (Presage + lip-movement fallback)
 presage/talk_bridge.mjs    Node bridge to the Presage SDK (the SDK is Node-only)
 arduino/loudness/          Arduino sketch that streams the loudness sensor
@@ -125,16 +129,39 @@ Calibrate with **F8** if you haven't yet, then:
 
 | Do this | Result |
 |---------|--------|
-| Look somewhere | Cursor moves there |
+| Look somewhere | Cursor moves there, and snaps onto a nearby button or link (green box) |
 | 1 tap | Left click |
 | 2 quick taps | Double click |
-| 3 quick taps | Start a drag (hold the left button). The next single tap drops it. |
+| 3 quick taps | **Action menu** at the cursor (see below) |
 | Talk | Cursor freezes, taps are ignored, and any drag is dropped |
+
+### Action menu (3 taps)
+
+A ring of four big buttons appears around the cursor. **Look at one and tap once.** Looking at the centre, tapping 2 or 3 times, or waiting 8 s cancels the menu. A blue dot shows where the app thinks you're looking.
+
+| Action | What happens |
+|--------|-------------|
+| **Right click** (top) | Right-clicks where you opened the menu |
+| **Drag / select** (right) | Presses the left button there. Move with your eyes, then any tap drops. Use it for drag-and-drop and for **selecting text**. |
+| **Scroll** (bottom) | Look above the menu point to scroll up, below it to scroll down. Looking further scrolls faster. Any tap stops. |
+| **Zoom** (left) | Shows a 3× magnified view of the area. Look at the exact spot: 1 tap clicks it, 2 taps double-click, 3 cancel. Use it for tiny or crowded targets. |
+
+### Accuracy helpers
+
+- **Clicks land where you were looking just before the tap.** The app averages your gaze over the third of a second before the first tap, so the head jolt from tapping doesn't move the click.
+- **The cursor freezes** from the first tap until the click is done.
+- **Snapping (F4 toggles it):**
+  - The cursor locks onto a button, link, checkbox, tab, menu item or icon once your gaze comes within about 45 px of it.
+  - It stays locked until you look more than about 90 px away, so jitter doesn't unsnap it.
+  - Over plain text it only locks when you're right on a link, so pointing at text stays free.
+  - It's off while dragging, scrolling, zooming or in the menu, so text selection is never affected.
+  - Tune it with `SNAP_IN_PX`, `SNAP_OUT_PX` and `SNAP_DWELL_S` in [handsfree/snap.py](handsfree/snap.py).
 
 **Check the integration.** Talk while tapping. Taps then appear in the debug window as `last: SINGLE (blocked: talking)` and the `blocked` count goes up, but no click happens.
 
 | Key (global) | Action |
 |-----|--------|
+| F4  | Snap to buttons on/off |
 | F5  | Jaw-tap clicks on/off |
 | F6  | Pause-while-talking on/off |
 | F7  | Cursor control on/off |
@@ -146,16 +173,19 @@ Calibrate with **F8** if you haven't yet, then:
 
 Options: `--no-clicks` (no Arduino), `--port COM10` (pick the Arduino port), `--camera 1` (another webcam).
 
+The function keys still reach the window you're in (F5 also refreshes a browser page, for example). Click on the debug window first if that matters.
+
 ### Debug window
 
 - **Camera:**
   - Eye outlines, irises and a head-direction arrow.
   - `BLINK` means the cursor is holding still.
-  - A green `TAP: ...` banner appears for each gesture.
+  - A green `TAP: ...` banner shows what each gesture did (`CLICK`, `MENU`, `RIGHT CLICK`, `DROP`...).
   - A red border means talking.
 - **Eyes (zoomed) / iris offset:** the raw signal that drives the cursor.
 - **Screen:** a minimap of your monitor. Red is the raw gaze estimate, green is smoothed, and the white cross is the actual cursor.
 - **Status lines:**
+  - State, cursor on/off, fps, `snap:` (`on`, `LOCKED` on a target, or `OFF`) and `mode:` (`normal`, `menu`, `drag`, `scroll` or `zoom`).
   - Calibration error.
   - Smoothing.
   - The talk detector.
@@ -175,6 +205,12 @@ Options: `--no-clicks` (no Arduino), `--port COM10` (pick the Arduino port), `--
 2. The readings are averaged into ~1 ms ticks.
 3. A fast envelope (minus a slow one, so humming or a voice cancels out) has to jump above the threshold to count as a tap.
 4. Taps within 250 ms of each other form a single, double or triple gesture.
+5. Each gesture is aimed at your average gaze from just before the first tap, or at the snapped target.
+
+**Snapping**
+1. A background thread asks Windows UI Automation what's at the gaze point and at 8 points around it, about 10 times a second.
+2. Clickable elements become candidates. Huge elements, like full-width list rows, are skipped.
+3. The cursor locks onto the nearest candidate after a short dwell, using the in/out zones described above.
 
 **Talk pause**
 1. Webcam frames are piped to a small Node process that runs the Presage SmartSpectra `TALKING` metric.

@@ -1,9 +1,9 @@
 """
-Jaw-tap clicks from the Grove loudness sensor on the Arduino (arduino/loudness/loudness.ino).
+Jaw-tap detection from the Grove loudness sensor on the Arduino (arduino/loudness/loudness.ino).
 
-Gestures (clicks land wherever the cursor is):
-  1 tap  -> left click        2 taps -> double click
-  3 taps -> start drag (hold left button); the next single tap drops it
+This module only detects taps and groups them into gestures (1, 2 or 3 taps). What a gesture
+does (click, double click, action menu...) lives in actions.py; app.py wires the two together
+and blocks everything while the user is talking.
 
 Detector (per 1 ms tick, adapted from the original sensor/plot.py):
   1. dev  = |tick - baseline|           baseline = very slow average (removes DC / drift)
@@ -17,8 +17,6 @@ The sketch streams readings as fast as it can (tens of thousands per second on o
 a few hundred on another), so raw readings are averaged into ~1 ms ticks and every tick carries
 its real length. The tuning below is therefore in real milliseconds on any machine, and Python
 never falls behind the board.
-
-While the user is talking (`is_paused()` returns True) taps never click and a drag is dropped.
 """
 
 import threading
@@ -27,7 +25,6 @@ from collections import deque
 
 import serial
 import serial.tools.list_ports
-from pynput.mouse import Button, Controller
 
 BAUD = 115200            # must match Serial.begin() in loudness.ino
 ARDUINO_VID = 0x2341
@@ -164,22 +161,20 @@ class SerialTicks:
 
 
 class JawClicker(threading.Thread):
-    """Background thread: sensor -> TapDetector -> OS clicks, unless disabled or paused."""
+    """Background thread: sensor -> TapDetector -> on_event(kind, gesture, wall_time).
 
-    def __init__(self, port=None, is_paused=lambda: False):
+    kind "tap":     a single tap was detected (gesture = taps so far in this group)
+    kind "gesture": the group finished (gesture = 1, 2 or 3)
+    """
+
+    def __init__(self, port=None, on_event=None):
         super().__init__(daemon=True)
         self.port_arg = port
         self.port = None
-        self.is_paused = is_paused
-        self.enabled = True
+        self.on_event = on_event or (lambda *e: None)
         self.alive = True
         self.status = "starting"
         self.det = TapDetector()
-        self.mouse = Controller()
-        self.dragging = False
-        self.last = ""              # e.g. "DOUBLE" or "SINGLE (blocked: talking)"
-        self.last_t = 0.0
-        self.blocked = 0
         self.raw_rate = 0.0
         self.sig_trail = deque(maxlen=600)   # recent signal, for the HUD sparkline
 
@@ -202,7 +197,6 @@ class JawClicker(threading.Thread):
             except serial.SerialException:
                 self.status = f"{self.port} disconnected"
             finally:
-                self.release_drag()
                 src.close()
             time.sleep(1)
 
@@ -210,53 +204,16 @@ class JawClicker(threading.Thread):
         while self.alive:
             ticks = src.read()
             self.raw_rate = src.raw_rate
-            paused = self.is_paused()
-            if paused or not self.enabled:
-                self.release_drag()
             peak = 0.0
             for v in ticks:
                 g = self.det.step(v, src.tick_ms)
                 peak = max(peak, self.det.sig)
+                if self.det.tap_now:
+                    self.on_event("tap", self.det.group or 3, time.time())
                 if g:
-                    self._gesture(g, paused)
+                    self.on_event("gesture", g, time.time())
             if ticks:
                 self.sig_trail.append(peak)
 
-    def _gesture(self, g, paused):
-        name = GESTURES[g]
-        self.last_t = time.time()
-        if not self.enabled:
-            self.last = f"{name} (clicks off)"
-            return
-        if paused:
-            self.blocked += 1
-            self.last = f"{name} (blocked: talking)"
-            return
-        self.last = name
-        if self.dragging:
-            if g == 1:              # only a single tap ends a drag
-                self.release_drag()
-                self.last = "DROP"
-            return
-        if g == 1:
-            self.mouse.click(Button.left, 1)
-        elif g == 2:
-            self.mouse.click(Button.left, 2)
-        else:
-            self.mouse.press(Button.left)
-            self.dragging = True
-            self.last = "DRAG (single tap drops)"
-
-    def release_drag(self):
-        if self.dragging:
-            self.mouse.release(Button.left)
-            self.dragging = False
-
-    def set_enabled(self, on):
-        self.enabled = on
-        if not on:
-            self.release_drag()
-
     def close(self):
         self.alive = False
-        self.release_drag()          # never leave the button held on exit
