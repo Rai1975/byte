@@ -3,3 +3,6 @@ package-lock.json
 __pycache__/
 .env
 calibration.json
+# third-party repos cloned locally for wake-word training
+voice_agent/training/openwakeword/
+voice_agent/training/piper-sample-generator/

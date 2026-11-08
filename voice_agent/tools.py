@@ -362,7 +362,7 @@ REGISTRY = {
     "search_web": (search_web, _schema("Google search in a NEW Chrome tab. Also opens Chrome if closed.", {"query": {"type": "string"}}, ["query"])),
     "browser_tab_action": (browser_tab_action, _schema("Chrome tab/navigation action.", {"action": {"type": "string", "enum": sorted(TAB_KEYS)}}, ["action"])),
     "type_text": (type_text, _schema("Type text into the focused (or given) app.", {"text": {"type": "string"}, "focus": _FOCUS}, ["text"])),
-    "press_keys": (press_keys, _schema("Press a key or combo, e.g. 'ctrl+l', 'enter', 'win+d'. F5-F10 and alt+f4 are refused.", {"keys": {"type": "string"}, "focus": _FOCUS}, ["keys"])),
+    "press_keys": (press_keys, _schema("Press a key or combo, e.g. 'ctrl+l', 'enter', 'win+d'. F4-F10 and alt+f4 are refused.", {"keys": {"type": "string"}, "focus": _FOCUS}, ["keys"])),
     "set_volume": (set_volume, _schema("Set system volume to a level (0-100), or change it relatively.", {"level": {"type": "number", "minimum": 0, "maximum": 100}, "change": {"type": "number", "description": "percent to add (negative to lower)"}})),
     "set_brightness": (set_brightness, _schema("Set screen brightness (0-100), or change it relatively.", {"level": {"type": "number", "minimum": 0, "maximum": 100}, "change": {"type": "number", "description": "percent to add (negative to lower)"}})),
     "set_mute": (set_mute, _schema("Mute or unmute system audio.", {"mute": {"type": "boolean"}}, ["mute"])),
@@ -382,11 +382,21 @@ def tool_specs():
 CONFIRM_REQUIRED = set()     # tools listed here need a spoken "confirm" within 5 s (none right now)
 
 
+# Called with the tool name just before any tool runs (agent.py uses it to flag dictation).
+ON_TOOL = None
+DICTATION_TOOLS = {"type_text"}
+
+
 def run_tool(name, args, confirmer=None):
     """Run one tool. Never raises: returns (ok, message).
     `confirmer(description) -> bool` asks the user to say "confirm" (see agent.py)."""
     if name not in REGISTRY:
         return False, f"unknown tool '{name}'"
+    if ON_TOOL is not None:
+        try:
+            ON_TOOL(name)
+        except Exception:
+            pass
     try:
         if name in CONFIRM_REQUIRED:
             if confirmer is None:

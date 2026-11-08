@@ -31,6 +31,9 @@ SLEEP_PHRASES = ["stop listening", "sleep", "go to sleep", "sleep mode", "pause 
 EXIT_PHRASES = ["exit voice control", "quit voice control", "close voice control"]
 CONFIRM_PHRASES = ["confirm", "confirmed", "yes confirm", "i confirm"]
 RESUME_PHRASES = ["resume", "resume listening", "wake up", "start listening", "resume voice control"]
+# A command that starts like this is dictation (text gets typed). Flagged as soon as it's transcribed,
+# and also whenever a typing tool runs, so the eye/jaw app gives typed text a longer settle time.
+DICTATION_RX = re.compile(r"^(?:byte |bite )?(?:please |can you |could you )?(?:write|type|dictate|note|jot|take (?:a )?note)\b")
 
 
 def setup_logging(console):
@@ -65,6 +68,8 @@ class Agent:
         self.quit = False
         self.trigger = threading.Event()
         self.pending = []                         # commands from the control endpoint
+        self.phase = ""                           # "" idle, else recording | transcribing | acting | dictating
+        self.dictation = False                    # this command types text ("write this down"...)
 
     # --- control seam -------------------------------------------------------------------
     def on_control(self, cmd):
@@ -79,16 +84,36 @@ class Agent:
     def state(self):
         return "sleeping" if self.sleeping else "listening"
 
+    def status(self):
+        """For GET /status. `busy` is True from the wake word until the command is done: the
+        hands-free mouse app pauses the eye cursor and jaw clicks while it is."""
+        return {"state": self.state(), "busy": bool(self.phase), "phase": self.phase,
+                "dictation": self.dictation}
+
+    def set_dictation(self, why):
+        if not self.dictation:
+            self.dictation = True
+            log.info("dictation mode (%s)", why)
+
     # --- one spoken interaction ---------------------------------------------------------
     def handle_utterance(self, mic, floor, transcribe, brain):
         """Called the instant the wake word is heard. No sound is played first: the mic queue
         already holds whatever was said right after the wake word, and recording starts from it."""
+        self.phase = "recording"
+        self.dictation = False          # stays set after the command ends, until the next one starts
+        try:
+            self._handle_utterance(mic, floor, transcribe, brain)
+        finally:
+            self.phase = ""
+
+    def _handle_utterance(self, mic, floor, transcribe, brain):
         from audio import beep, record_command
         import win32gui
         t0 = time.time()
         target = win32gui.GetForegroundWindow()      # where dictated text will be pasted
         audio = record_command(mic, floor)
         t1 = time.time()
+        self.phase = "transcribing"
         if audio is None:
             log.info("no speech after wake")
             beep("fail")
@@ -96,6 +121,8 @@ class Agent:
         text = transcribe(audio)
         t2 = time.time()
         log.info("heard: %r%s", text, " [sleeping]" if self.sleeping else "")
+        if not self.sleeping and DICTATION_RX.match(normalize(text)):
+            self.set_dictation("command wording")
         if not text:
             beep("fail")
             return
@@ -115,6 +142,8 @@ class Agent:
         elif matches(text, RESUME_PHRASES):
             beep("resume")
         elif dictate.split_trigger(text) is not None:
+            self.set_dictation("write this down")
+            self.phase = "dictating"
             try:
                 ok = self.dictate(mic, floor, transcribe, brain, audio, text, target)
             except Exception:
@@ -124,6 +153,7 @@ class Agent:
             log.info("timing: listen %.1fs | first speech-to-text %.1fs | dictation total %.1fs",
                      t1 - t0, t2 - t1, time.time() - t2)
         else:
+            self.phase = "acting"
             try:
                 ok, summary = brain.run(text, lambda what: self.ask_confirm(mic, floor, transcribe, what))
             except Exception:
@@ -182,10 +212,12 @@ class Agent:
         from control import start_server
         from wake import load_wake
 
+        import tools
+        tools.ON_TOOL = lambda name: name in tools.DICTATION_TOOLS and self.set_dictation(f"tool {name}")
         brain = Brain(self.model)
         transcribe = audio.Transcriber()
         wake = load_wake()
-        start_server(config.CONTROL_PORT, self.on_control, self.state)
+        start_server(config.CONTROL_PORT, self.on_control, self.status)
         mic, floor = audio.Mic(), audio.NoiseFloor()
         last_wake = 0.0
         failures = 0

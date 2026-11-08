@@ -6,7 +6,7 @@ Say the wake word, then a command straight away. It records the instant it hears
 
 Pipeline: wake word (sherpa-onnx keyword spotting, or openWakeWord) → record until silence → faster-whisper (local, GPU) → instant local matching, else Claude tool use → actions. Only the Claude call leaves your PC.
 
-It is separate from the eye/jaw app: its own `.venv`, nothing imported from `handsfree/`, no mouse input, never presses F5–F10 (those are that app's hotkeys).
+It has its own `.venv` and imports nothing from `handsfree/`. It never moves the mouse and never presses F4–F10 (those are the eye/jaw app's hotkeys). `python main.py` in the repo root starts it automatically and pauses the eye cursor and jaw clicks while it's handling a command (see "Control seam" below). You can also run it on its own.
 
 ## Setup
 
@@ -27,8 +27,8 @@ Default wake word: **"byte"** (or "hey byte"). "Bite" sounds identical, so it wa
 - **"stop listening"** / **"sleep"**: pauses. While asleep, say the wake word then **"resume"** (also "wake up", "start listening").
 - **"exit voice control"**: quits. It stays off until the next login or manual start.
 - **Closing apps** ("close Calculator"): closes immediately, no confirmation. It closes windows politely (like clicking X), so an app with unsaved work still shows its own "save changes?" prompt, and the window stays open until you answer it. It never kills processes. "Close Chrome" closes all Chrome windows.
-- **"write this down"** / **"write this"**: dictation. Click into a textbox, then say the wake word, "write this down", and talk. You can carry straight on in the same breath ("byte, write this down: I'll be ten minutes late") or pause first. A **2.5 s pause** ends it (`DICTATION_SILENCE_S`; 2 min max). Claude cleans up the text: it fixes grammar, punctuation and misheard words; removes um/uh and false starts; applies self-corrections ("at 3, uhm, actually no, 4" → "at 4"); turns lists into `- ` bullets; and follows "new line" / "new paragraph". It does not reword your ideas. The result is pasted with Ctrl+V into the window that was focused when you said the wake word, and your previous clipboard text comes back a second later. If the paste fails, the text stays on the clipboard. Test without the mic: `python agent.py --text "write this down um ..." [--paste]`.
-- No shutdown/restart/delete tools exist, and `alt+f4` and F5–F10 are refused. Claude answers "unclear" for them.
+- **"write this down"** / **"write this"**: dictation. Click into a textbox, then say the wake word, "write this down", and talk. You can carry straight on in the same breath ("byte, write this down: I'll be ten minutes late") or pause first. A **2.5 s pause** ends it (`DICTATION_SILENCE_S`; 2 min max). Claude cleans up the text: it fixes grammar, punctuation and misheard words; removes um/uh and false starts; applies self-corrections ("at 3, uhm, actually no, 4" → "at 4"); turns lists into `- ` bullets; and follows "new line" / "new paragraph". It does not reword your ideas. The result is pasted with Ctrl+V into the window that was focused when you said the wake word, and your previous clipboard text comes back a second later. If the paste fails, the text stays on the clipboard. Test without the mic: `python agent.py --text "write this down um ..." [--paste]`. While it records and until 4 s after the paste, the eye/jaw app keeps the cursor and clicks paused (dictation mode), so focus stays in your textbox.
+- No shutdown/restart/delete tools exist, and `alt+f4` and F4–F10 are refused. Claude answers "unclear" for them.
 
 ## Apps and brightness
 
@@ -75,7 +75,9 @@ python agent.py --call-tool set_volume level=30              # one tool, no Clau
 
 ## Control seam (for the eye/jaw app)
 
-`POST http://127.0.0.1:8765/pause | /resume | /trigger`, `GET /status`. POSTs need the header `X-Voice-Agent: 1`. `/trigger` is push-to-talk: it starts recording immediately with no wake word, so a jaw clench can replace the wake word. Not wired into your app.
+`POST http://127.0.0.1:8765/pause | /resume | /trigger`, `GET /status`. POSTs need the header `X-Voice-Agent: 1`. `/trigger` is push-to-talk: it starts recording immediately with no wake word, so a jaw clench could replace the wake word (not wired up yet).
+
+`GET /status` returns `{"state": "listening"|"sleeping", "busy": bool, "phase": ""|"recording"|"transcribing"|"acting", "dictation": bool}`. `busy` is true from the wake word until the command is completely done. `dictation` turns on (and is logged as `dictation mode`) when the transcript starts with write/type/dictate/note or when `type_text` runs, and stays on until the next command starts. `handsfree/voice_link.py` polls this and pauses the eye cursor and jaw clicks while `busy`, then for 1 s more, or 4 s after a dictation command.
 
 ```python
 import urllib.request

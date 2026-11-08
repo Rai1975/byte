@@ -4,7 +4,10 @@ can control the agent.
     POST http://127.0.0.1:8765/pause     -> same as "stop listening"
     POST http://127.0.0.1:8765/resume    -> wake up again
     POST http://127.0.0.1:8765/trigger   -> push-to-talk: start listening now, no wake word
-    GET  http://127.0.0.1:8765/status    -> {"state": "listening" | "sleeping"}
+    GET  http://127.0.0.1:8765/status    -> {"state": "listening" | "sleeping",
+                                             "busy": true while handling a command,
+                                             "phase": "" | "recording" | "transcribing" | "acting" | "dictating",
+                                             "dictation": true if this (or the last) command types text}
 
 Every POST needs the header  X-Voice-Agent: 1 . Browsers cannot send that header cross-site
 without a CORS preflight (which we never allow), so a web page cannot poke the agent.
@@ -18,7 +21,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 log = logging.getLogger("voice_agent")
 
 
-def start_server(port, on_command, get_state):
+def start_server(port, on_command, get_status):
     class Handler(BaseHTTPRequestHandler):
         def _reply(self, code, obj):
             body = json.dumps(obj).encode()
@@ -35,7 +38,7 @@ def start_server(port, on_command, get_state):
             if not self._host_ok():
                 return self._reply(403, {"error": "bad host"})
             if self.path == "/status":
-                return self._reply(200, {"state": get_state()})
+                return self._reply(200, get_status())
             self._reply(404, {"error": "not found"})
 
         def do_POST(self):
