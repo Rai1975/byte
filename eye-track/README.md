@@ -16,8 +16,8 @@ To refresh dependencies after `environment.yml` changes: `conda env update -f ey
 
 ## Using it
 
-1. Press **F8** to calibrate. Sit how you normally will, keep your head still, press SPACE, and follow the 13 dots with your eyes.
-2. An **accuracy check** (9 dots) runs straight after and shows the error in px, cm, and degrees. Cursor control then turns on.
+1. Press **F8** to calibrate. Sit how you normally will, keep your head still, press SPACE, and follow the 25 dots, then a 30 s moving dot, with your eyes.
+2. An **accuracy check** (9 dots) runs straight after and shows the error in px, cm, and degrees. If the error is above `TARGET_PX` (35), press SPACE for another round: a new 30 s moving-dot path is added to the pooled data, the check's own points are added too, the model is refit, and it is tested again. It stops at the target, after `MAX_ROUNDS` (5), or on ESC. Cursor control then turns on.
 3. To recalibrate, press F8 again, especially after you move your chair or laptop or the lighting changes.
 
 | Key | Action |
@@ -26,6 +26,7 @@ To refresh dependencies after `environment.yml` changes: `conda env update -f ey
 | F7  | Cursor control on/off (global) |
 | F8  | Calibrate (global) |
 | F9  | Accuracy check (global) |
+| F11 | Add another moving-dot round to the existing data, then test (global) |
 | F10 | Quit (global) |
 | `[` / `]` | Less / more smoothing (debug window focused) |
 | `-` / `=` | Less / more responsiveness during fast moves |
@@ -66,8 +67,11 @@ The debug window shows which detector is active, the Presage status (for example
    - Eye openness, which helps with vertical gaze.
    - Head yaw and pitch.
    - Both eyes are averaged, weighted by eye width.
-3. **Calibration**: 13 dots, about 1 s of samples each after a settle delay. Saccade and glitch frames are rejected per dot with a median/MAD filter.
-4. **Model**: ridge-regularized regression on `[1, features, iris_x², iris_y², iris_x·iris_y]` → screen x, y. Including head pose lets small head movements count instead of breaking the mapping.
+3. **Calibration**: 25 dots (5×5 grid), about 1.8 s of samples each after a 1.4 s settle delay. Saccade and glitch frames are rejected per dot with a median/MAD filter.
+3b. **Eyes and head are trained separately.**
+    - *Eyes only (head still)*: the 25 dots and a 30 s moving dot. The eyes trail the dot by about 100-250 ms, so the lag is estimated from the data and the dot position is matched to the eye features that much earlier. The worst 10% of samples (catch-up saccades) are dropped.
+    - *Head only (eyes fixed)*: 3 static dots, 20 s each, with prompts every 4 s: move CLOSER, TILT, SPIN, move BACK, NOD. Keep your eyes on the dot. The gaze target never changes, so every shift of the iris signal here is caused by the head. A small linear model learns "iris shift per unit of head movement" (`HeadComp`) and subtracts it, so the eye model only sees the iris position as if the head were at its neutral pose. The console prints how much of the iris shift the head explains.
+4. **Model**: one ridge regression per screen axis on `[1, features, iris polynomial terms]`. Each axis picks its polynomial order (linear, quadratic or cubic in the iris offset) and ridge strength by leave-one-dot-out cross-validation, so extra capacity is only used if it helps held-out dots. The debug window shows the fit error next to the held-out error; a large gap means overfitting. A second stage then fits a smooth *residual field* over the predicted screen position (the remaining error depends on where on the screen you look) and subtracts it; it is kept only if it improves held-out error. Including head pose lets small head movements count instead of breaking the mapping.
 5. **Smoothing**: a One Euro filter (steady when you fixate, low lag when you move). A 120 Hz cursor thread glides between camera frames, and the cursor holds still during blinks.
 
 ## Tips for accuracy
