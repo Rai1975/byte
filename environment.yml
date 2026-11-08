@@ -14,3 +14,4 @@ dependencies:
       - screeninfo>=0.8
       - pyserial>=3.5            # Arduino tap sensor (handsfree/jaw_clicker.py)
       - matplotlib>=3.8          # tools/tap_plot.py graph
+      - uiautomation>=2.0        # snap to buttons (handsfree/snap.py)

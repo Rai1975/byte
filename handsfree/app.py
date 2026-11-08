@@ -10,13 +10,16 @@ Pipeline
          -> One Euro filter (low jitter when still, responsive when moving)
          -> 120 Hz cursor driver (pynput) that glides toward the filtered gaze point
 
-Clicks come from jaw taps on the Arduino loudness sensor (jaw_clicker.py): 1 tap = click,
-2 = double click, 3 = start drag (next single tap drops).
+Clicks come from jaw taps on the Arduino loudness sensor (jaw_clicker.py -> actions.py):
+1 tap = click, 2 = double click, 3 = action menu (right click, drag/select, scroll, zoom).
+Clicks land where you looked just before the tap, and the cursor freezes during the tap.
+The cursor snaps onto nearby buttons/links (snap.py); overlay.py draws the menu and highlights.
 
 While the user is talking, ALL mouse input (cursor and clicks) is paused (talk_detect.py:
 Presage TALKING metric, with a lip-movement fallback). Any new input must check `App.inputs_paused`.
 
 Hotkeys (global, work even when another window has focus)
+  F4  toggle snapping to buttons on/off
   F5  toggle jaw-tap clicks on/off
   F6  toggle pause-while-talking on/off
   F7  toggle cursor control on/off
@@ -55,7 +58,10 @@ from mediapipe.tasks.python import BaseOptions, vision
 from pynput import keyboard as pkeyboard
 from pynput import mouse as pmouse
 
-from .jaw_clicker import THRESHOLD as TAP_THRESHOLD, JawClicker
+from .actions import AIM_WINDOW_S, Actions
+from .jaw_clicker import GESTURES, THRESHOLD as TAP_THRESHOLD, JawClicker
+from .overlay import Overlay
+from .snap import SnapLogic, Snapper
 from .talk_detect import TalkGate
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # repo root
@@ -325,12 +331,27 @@ class App:
         self.cursor = CursorDriver(self.sw, self.sh)
         self.cursor.start()
 
-        # Talking pauses ALL mouse input: the cursor (update_gaze) and jaw-tap clicks (is_paused).
+        # Talking pauses ALL mouse input: the cursor (update_gaze/steer) and jaw-tap gestures.
         self.talk = TalkGate()
         self.talking = False
+
+        self.actions = Actions(self.sw, self.sh, self.cursor)
+        self.overlay = Overlay(self.sw, self.sh)
+        self.overlay.start()
+        self.snapper = Snapper()
+        self.snapper.start()
+        self.snap = SnapLogic()
+        self.snap_enabled = True
+        self.gaze_pt = None              # latest smoothed gaze on screen (None = unknown)
+        self.gaze_hist = deque(maxlen=90)   # (t, x, y) for aiming clicks
+        self.tap_events = queue.Queue()
+        self.tap_aim = None              # aim point captured at the first tap of a gesture
+        self.clicks_enabled = True
+        self.blocked = 0
+        self.last_action, self.last_action_t = "", 0.0
         self.clicker = None
         if clicks:
-            self.clicker = JawClicker(port, is_paused=lambda: self.inputs_paused)
+            self.clicker = JawClicker(port, on_event=lambda *e: self.tap_events.put(e))
             self.clicker.start()
 
         self.keys = queue.Queue()
@@ -360,7 +381,7 @@ class App:
 
     # ------------------------------------------------------------------ input
     def _on_global_key(self, key):
-        names = {pkeyboard.Key.f5: "clicks", pkeyboard.Key.f6: "talk", pkeyboard.Key.f7: "toggle", pkeyboard.Key.f8: "calib", pkeyboard.Key.f9: "valid",
+        names = {pkeyboard.Key.f4: "snap", pkeyboard.Key.f5: "clicks", pkeyboard.Key.f6: "talk", pkeyboard.Key.f7: "toggle", pkeyboard.Key.f8: "calib", pkeyboard.Key.f9: "valid",
                  pkeyboard.Key.f10: "quit", pkeyboard.Key.space: "space", pkeyboard.Key.esc: "esc"}
         if key in names:
             self.keys.put(names[key])
@@ -427,8 +448,91 @@ class App:
         self.raw = raw
         self.smooth = self.filter(raw, now)
         self.gaze_trail.append(tuple(self.smooth))
-        self.cursor.target = (float(np.clip(self.smooth[0], 0, self.sw - 1)),
-                              float(np.clip(self.smooth[1], 0, self.sh - 1)))
+        self.gaze_pt = (float(np.clip(self.smooth[0], 0, self.sw - 1)),
+                        float(np.clip(self.smooth[1], 0, self.sh - 1)))
+        self.gaze_hist.append((now, *self.gaze_pt))
+
+    # ------------------------------------------------------------------ taps, snapping, actions
+    def _aim(self, t):
+        """Where a gesture whose first tap happened at time t should land."""
+        if self.actions.mode == "normal":
+            if self.snap.current is not None:
+                return self.snap.center
+            if not self.cursor.enabled:          # eye cursor off: click wherever the mouse is
+                return tuple(self.cursor.mouse.position)
+        t0, t1 = t - AIM_WINDOW_S[0], t - AIM_WINDOW_S[1]
+        pts = [(x, y) for ts, x, y in self.gaze_hist if t0 <= ts <= t1]
+        if pts:
+            return tuple(np.mean(pts, axis=0))
+        if self.gaze_pt is not None:
+            return self.gaze_pt
+        return tuple(self.cursor.mouse.position)
+
+    def _set_last(self, label):
+        self.last_action, self.last_action_t = label, time.time()
+
+    def handle_taps(self, now):
+        while not self.tap_events.empty():
+            kind, g, t = self.tap_events.get_nowait()
+            blocked = self.inputs_paused or not self.clicks_enabled
+            if kind == "tap":
+                if not blocked and self.tap_aim is None:
+                    self.tap_aim = self._aim(t)
+                    self.actions.tap_started(self.tap_aim, now)
+                continue
+            aim, self.tap_aim = self.tap_aim, None
+            name = GESTURES[g]
+            if not self.clicks_enabled:
+                self.actions.hold = None
+                self._set_last(f"{name} (clicks off)")
+                continue
+            if self.inputs_paused:
+                self.actions.hold = None
+                self.blocked += 1
+                self._set_last(f"{name} (blocked: talking)")
+                continue
+            if aim is None:
+                aim = self._aim(t)
+            label = self.actions.gesture(g, aim, now)
+            if self.actions.mode != "normal":
+                self.snap.reset()
+            self._set_last(label)
+
+    def steer(self, now):
+        """Pick the cursor target (freeze > snap > gaze), run modes, update the overlay."""
+        paused = self.inputs_paused
+        if paused and self.actions.mode == "drag":
+            self.actions.cancel()
+            self._set_last("DROP (talking)")
+        gaze = self.gaze_pt if self.model.ready else None
+        snap_on = (self.snap_enabled and self.cursor.enabled and gaze is not None and not paused
+                   and self.actions.mode == "normal")
+        if snap_on:
+            self.snapper.query = gaze
+            if self.actions.hold is None:        # don't re-snap while frozen for a click
+                self.snap.update(gaze, self.snapper.result, now)
+        else:
+            self.snapper.query = None
+            self.snap.reset()
+        hold = self.actions.hold_point(now)
+        target = hold or self.snap.center or gaze
+        if target is not None:
+            self.cursor.target = target
+        self.actions.frame(gaze, now, paused)
+        st = self.actions.overlay_state(gaze)
+        if self.snap.current is not None:
+            st["snap"] = self.snap.current[0]
+        self.overlay.set(st)
+
+    def reset_inputs(self):
+        """Before calibration etc.: leave any mode, clear the overlay, drop queued taps."""
+        self.actions.cancel()
+        self.snap.reset()
+        self.snapper.query = None
+        self.tap_aim = None
+        self.overlay.set({})
+        while not self.tap_events.empty():
+            self.tap_events.get_nowait()
 
     # ------------------------------------------------------------------ windows
     def open_debug(self, canvas_shape):
@@ -691,8 +795,8 @@ class App:
         if self.talking:
             cv2.rectangle(cam, (0, 0), (cam_w - 1, cam_h - 1), C_RED, 4)
             put(cam, "TALKING - INPUT PAUSED", (12, 34), 0.8, C_WHITE, 2, bg=(40, 40, 200))
-        if self.clicker and time.time() - self.clicker.last_t < 1.0:
-            put(cam, f"TAP: {self.clicker.last}", (12, 72), 0.7, C_WHITE, 2, bg=(30, 110, 30))
+        if time.time() - self.last_action_t < 1.0:
+            put(cam, f"TAP: {self.last_action}", (12, 72), 0.7, C_WHITE, 2, bg=(30, 110, 30))
         canvas[:cam_h, :cam_w] = cam
 
         px = cam_w + 10
@@ -787,7 +891,9 @@ class App:
         # --- status text under camera
         ty = cam_h + 24
         ctl = "ON" if self.cursor.enabled else "OFF"
-        status = f"state: {self.state}   cursor control: {ctl}   fps: {self.fps:.0f}"
+        snap = "OFF" if not self.snap_enabled else ("LOCKED" if self.snap.current else "on")
+        status = (f"state: {self.state}   cursor: {ctl}   fps: {self.fps:.0f}   "
+                  f"snap: {snap}   mode: {self.actions.mode}")
         put(canvas, status, (10, ty), 0.55, C_GREEN if self.cursor.enabled else C_YELLOW)
         if 0 < self.fps < LOW_FPS_WARN:
             put(canvas, f"LOW CAMERA FPS ({self.fps:.0f}) - lower CAM_W/CAM_H or add light",
@@ -811,7 +917,7 @@ class App:
                      f"lips {lt.level:.3f}/{lt.reversals}")
         put(canvas, talk_line, (10, ty + 72), 0.45, C_RED if self.talking else C_GRAY)
         self._draw_clicks(canvas, (10, ty + 96), canvas.shape[1])
-        put(canvas, "F5 clicks  F6 talk-pause  F7 cursor  F8 calibrate  F9 accuracy  F10 quit",
+        put(canvas, "F4 snap  F5 clicks  F6 talk-pause  F7 cursor  F8 calib  F9 accuracy  F10 quit",
             (10, ty + 122), 0.5, C_CYAN)
         if time.time() < self.message_until:
             put(canvas, self.message, (10, ty + 148), 0.5, C_YELLOW)
@@ -822,14 +928,15 @@ class App:
         if c is None:
             put(canvas, "clicks: disabled (--no-clicks)", org, 0.45, C_GRAY)
             return
-        state = ("ON" if c.enabled else "OFF") + (" - DRAGGING" if c.dragging else "")
+        state = "ON" if self.clicks_enabled else "OFF"
         if c.status != "running":
             text = f"clicks [{c.port or '?'}]: {c.status}"
         else:
             rate = f"{c.raw_rate / 1000:.0f}k/s" if c.raw_rate >= 1000 else f"{c.raw_rate:.0f}/s"
             text = (f"clicks [{c.port} {rate}]: {state}   taps {c.det.taps}   "
-                    f"blocked {c.blocked}   last: {c.last or '-'}")
-        color = C_RED if (c.status != "running" or self.inputs_paused) else (C_GREEN if c.enabled else C_YELLOW)
+                    f"blocked {self.blocked}   last: {self.last_action or '-'}")
+        color = (C_RED if (c.status != "running" or self.inputs_paused)
+                 else (C_GREEN if self.clicks_enabled else C_YELLOW))
         put(canvas, text, org, 0.45, color)
         # sparkline of the tap signal (red line = threshold), right-aligned on the same row
         trail = list(c.sig_trail)[-150:]
@@ -850,10 +957,17 @@ class App:
                 for ev in self._take_events():
                     if ev == "quit":
                         return
-                    if ev == "clicks":
+                    if ev == "snap":
+                        self.snap_enabled = not self.snap_enabled
+                        self.flash(f"Snap to buttons {'ON' if self.snap_enabled else 'OFF'}", 3)
+                        if self.snapper.status not in ("ready", "starting"):
+                            self.flash(f"Snap: {self.snapper.status}", 6)
+                    elif ev == "clicks":
                         if self.clicker:
-                            self.clicker.set_enabled(not self.clicker.enabled)
-                            self.flash(f"Jaw-tap clicks {'ON' if self.clicker.enabled else 'OFF'}", 3)
+                            self.clicks_enabled = not self.clicks_enabled
+                            if not self.clicks_enabled:
+                                self.actions.cancel()
+                            self.flash(f"Jaw-tap clicks {'ON' if self.clicks_enabled else 'OFF'}", 3)
                         else:
                             self.flash("Clicks disabled (--no-clicks)", 3)
                     elif ev == "talk":
@@ -866,11 +980,15 @@ class App:
                         else:
                             self.flash("Calibrate first (F8)", 4)
                     elif ev == "calib":
+                        self.reset_inputs()
                         self.state = "calib"
                         self.calibrate()
+                        self.reset_inputs()
                     elif ev == "valid":
+                        self.reset_inputs()
                         self.state = "valid"
                         self.validate()
+                        self.reset_inputs()
 
                 frame, info = self.grab()
                 if frame is None:
@@ -882,6 +1000,8 @@ class App:
                 t_prev = now
                 self.fps = 0.9 * self.fps + 0.1 * (1.0 / max(dt, 1e-3))
                 self.update_gaze(info, now)
+                self.handle_taps(now)
+                self.steer(now)
 
                 canvas = self.render_debug(frame, info)
                 self.open_debug(canvas.shape)
@@ -903,6 +1023,9 @@ class App:
             self.talk.close()
             if self.clicker:
                 self.clicker.close()
+            self.actions.cancel()        # never leave the left button held on exit
+            self.snapper.close()
+            self.overlay.close()
             self.cap.release()
             cv2.destroyAllWindows()
 
@@ -910,7 +1033,7 @@ class App:
         ev = []
         while not self.keys.empty():
             e = self.keys.get_nowait()
-            if e in ("quit", "toggle", "calib", "valid", "talk", "clicks"):
+            if e in ("quit", "toggle", "calib", "valid", "talk", "clicks", "snap"):
                 ev.append(e)
         return ev
 
