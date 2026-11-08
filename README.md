@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/logo.png" alt="Byte logo: a pixel-art tooth with a smiley face" width="160"></p>
+
 # Byte
 
 **Hands-free computer control: look to point, tap your teeth to click, speak to command.**
