@@ -69,6 +69,15 @@ FAST_MODEL = "claude-haiku-5-5"
 MAX_TOKENS = _get("MAX_TOKENS", 512, int)
 MAX_TOOL_ROUNDS = 6
 
+# --- dictation ("write this down") -----------------------------------------------------
+DICTATION_SILENCE_S = _get("DICTATION_SILENCE_S", 2.5, float)   # a pause this long ends the dictation
+DICTATION_MAX_S = _get("DICTATION_MAX_S", 120.0, float)         # hard cap on one dictation
+DICTATION_START_S = _get("DICTATION_START_S", 6.0, float)       # time to start talking after "write this down"
+DICTATION_MODEL = _get("DICTATION_MODEL", CLAUDE_MODEL)
+DICTATION_MAX_TOKENS = _get("DICTATION_MAX_TOKENS", 4096, int)
+DICTATION_HINT = "Hi Sarah, thanks for the update. Here's the plan: first, we meet on Monday; second, we ship on Friday."
+CLIPBOARD_RESTORE_S = 1.0                                       # wait before putting your old clipboard back
+
 # --- control seam (localhost) ----------------------------------------------------------
 CONTROL_PORT = _get("CONTROL_PORT", 8765, int)
 

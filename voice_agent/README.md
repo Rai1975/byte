@@ -27,6 +27,7 @@ Default wake word: **"byte"** (or "hey byte"). "Bite" sounds identical, so it wa
 - **"stop listening"** / **"sleep"**: pauses. While asleep, say the wake word then **"resume"** (also "wake up", "start listening").
 - **"exit voice control"**: quits. It stays off until the next login or manual start.
 - **Closing apps** ("close Calculator"): closes immediately, no confirmation. It closes windows politely (like clicking X), so an app with unsaved work still shows its own "save changes?" prompt, and the window stays open until you answer it. It never kills processes. "Close Chrome" closes all Chrome windows.
+- **"write this down"** / **"write this"**: dictation. Click into a textbox, then say the wake word, "write this down", and talk. You can carry straight on in the same breath ("byte, write this down: I'll be ten minutes late") or pause first. A **2.5 s pause** ends it (`DICTATION_SILENCE_S`; 2 min max). Claude cleans up the text: it fixes grammar, punctuation and misheard words; removes um/uh and false starts; applies self-corrections ("at 3, uhm, actually no, 4" → "at 4"); turns lists into `- ` bullets; and follows "new line" / "new paragraph". It does not reword your ideas. The result is pasted with Ctrl+V into the window that was focused when you said the wake word, and your previous clipboard text comes back a second later. If the paste fails, the text stays on the clipboard. Test without the mic: `python agent.py --text "write this down um ..." [--paste]`.
 - No shutdown/restart/delete tools exist, and `alt+f4` and F5–F10 are refused. Claude answers "unclear" for them.
 
 ## Apps and brightness
@@ -87,4 +88,4 @@ In `tools.py`, write a function that returns a short string (raise on error), th
 
 ## Files
 
-`agent.py` main loop and CLI · `audio.py` mic, beeps, recording, Whisper · `brain.py` Claude loop and prompt · `tools.py` tools · `winapi.py` SendInput and window focus · `control.py` localhost endpoint · `run_hidden.pyw` + `install_autostart.ps1` autostart.
+`agent.py` main loop and CLI · `dictate.py` "write this down" trigger, cleanup prompt, clipboard paste · `audio.py` mic, beeps, recording, Whisper · `brain.py` Claude loop and prompt · `tools.py` tools · `winapi.py` SendInput and window focus · `control.py` localhost endpoint · `run_hidden.pyw` + `install_autostart.ps1` autostart.
