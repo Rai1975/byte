@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/logo.png" alt="Hands-Free Mouse logo: a pixel-art tooth with a smiley face" width="160"></p>
+
 # Hands-Free Mouse
 
 Control your computer's mouse without your hands:
