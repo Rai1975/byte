@@ -3,14 +3,20 @@ What jaw taps do. Gesture map:
 
   1 tap   left click
   2 taps  double click
-  3 taps  action menu at the cursor: look at an action, then 1 tap
+  3 taps  action menu at the cursor, "Right click" highlighted. Taps only, no aiming:
+            1 tap   move the highlight clockwise:
+                    Right click -> Drag / select -> Scroll -> Zoom -> Cancel -> Right click ...
+            2 taps  choose the highlighted option
+            3 taps  cancel (it also closes by itself MENU_TIMEOUT_S after the last tap)
+          Options:
             Right click     right click where the menu was opened
-            Drag / select   press there, move with your eyes, any tap drops (drag-and-drop,
-                            text selection)
+            Drag / select   press and hold there, move with your eyes, any tap drops
+                            (drag-and-drop, text selection, window dragging)
             Scroll          look above / below the menu point to scroll, any tap stops
             Zoom            magnified view of the area; look at the exact spot, then
                             1 tap = click, 2 taps = double click, 3 taps = cancel
-          centre of the menu (or 2-3 taps) = cancel; it also closes by itself after 8 s
+
+With MENU_ENABLED = False, 3 taps instead hold the left button directly (a tap drops it).
 
 Accuracy helpers used for every action:
   - the click lands where you were looking just BEFORE the first tap (gaze averaged over
@@ -29,10 +35,11 @@ from pynput.mouse import Button, Controller
 AIM_WINDOW_S = (0.35, 0.03)  # average gaze from 350 ms to 30 ms before the first tap
 FREEZE_AFTER_S = 0.2         # keep the cursor still this long after a click
 FREEZE_MAX_S = 1.5           # safety: never freeze longer than this waiting for a gesture
+MENU_ENABLED = True          # False: 3 taps hold the left button directly instead of the menu
 MENU_RADIUS = 140            # centre -> action button distance (px)
 MENU_ITEM_R = 62             # action button radius
 MENU_DEAD = 50               # centre "Cancel" radius
-MENU_TIMEOUT_S = 8.0
+MENU_TIMEOUT_S = 10.0        # menu closes this long after the last tap
 MENU_ITEMS = [("Right click", -90), ("Drag / select", 0), ("Scroll", 90), ("Zoom", 180)]  # angle, 0 = right
 SCROLL_DEAD_PX = 60          # gaze within this of the menu point = no scrolling
 SCROLL_FULL_PX = 320         # gaze this far away = full speed
@@ -133,8 +140,13 @@ class Actions:
             elif g == 2:
                 self.mouse.click(Button.left, 2)
                 label = "DOUBLE CLICK"
+            elif not MENU_ENABLED:          # 3 taps: hold the left button here; a tap drops it
+                self.mouse.press(Button.left)
+                self.mode, self.point = "drag", p
+                self._freeze(p, FREEZE_AFTER_S)   # settle briefly, then the cursor follows your eyes
+                return "HOLD (1 tap drops)"
             else:
-                self.mode, self.point, self.menu_t, self.sel = "menu", p, now, None
+                self.mode, self.point, self.menu_t, self.sel = "menu", p, now, 0   # "Right click" highlighted
                 m = MENU_RADIUS + MENU_ITEM_R + 10
                 self.menu_center = (min(max(p[0], m), self.sw - m), min(max(p[1], m), self.sh - m))
                 return "MENU"
@@ -142,7 +154,12 @@ class Actions:
             return label
 
         if mode == "menu":
-            pick = self._menu_pick(aim) if g == 1 else None
+            self.menu_t = now                       # each tap restarts the timeout
+            if g == 1:                              # next option, clockwise; Cancel sits after Zoom
+                self.sel = None if self.sel == len(MENU_ITEMS) - 1 else (
+                    0 if self.sel is None else self.sel + 1)
+                return "next: " + ("Cancel" if self.sel is None else MENU_ITEMS[self.sel][0])
+            pick = self.sel if g == 2 else None     # 2 taps choose, 3 taps cancel
             if pick is None:
                 self._to_normal()
                 return "menu cancelled"
@@ -212,8 +229,7 @@ class Actions:
     def frame(self, gaze, now, paused):
         dt = 0.0 if self._last_frame is None else min(now - self._last_frame, 0.1)
         self._last_frame = now
-        if self.mode == "menu":
-            self.sel = self._menu_pick(gaze)
+        if self.mode == "menu":                     # the highlight moves with taps, not gaze
             if now - self.menu_t > MENU_TIMEOUT_S:
                 self._to_normal()
         elif self.mode == "scroll" and gaze is not None:
@@ -234,13 +250,11 @@ class Actions:
         if self.mode == "menu":
             st["menu"] = dict(center=self.menu_center, items=self._menu_geometry(), sel=self.sel,
                               radius=MENU_RADIUS, item_r=MENU_ITEM_R, dead=MENU_DEAD)
-            if gaze is not None:
-                st["dot"] = gaze
         elif self.mode == "scroll":
             st["scroll"] = dict(center=self.point, dy=self.scroll_dy, dead=SCROLL_DEAD_PX, full=SCROLL_FULL_PX)
             st["banner"] = "SCROLL: look up / down  -  any tap stops"
         elif self.mode == "zoom":
             st["zoom"] = dict(self.zoom, gaze=gaze)
         elif self.mode == "drag":
-            st["banner"] = "DRAGGING: move with your eyes  -  any tap drops"
+            st["banner"] = "HOLDING: move with your eyes  -  1 tap drops"
         return st

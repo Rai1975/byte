@@ -129,7 +129,8 @@ class Overlay(threading.Thread):
         fill = SEL if m["sel"] is None else DARK
         c.create_oval(cx - cr, cy - cr, cx + cr, cy + cr, fill=fill, outline=ACCENT, width=2)
         c.create_text(cx, cy, text="Cancel", fill=WHITE, font=FONT_SMALL)
-        self._label(cx, cy + R + r + 30, "look at an action, then 1 tap", font=FONT_SMALL)
+        self._label(cx, cy + R + r + 30, "1 tap: next (clockwise)   2 taps: select   3 taps: cancel",
+                    font=FONT_SMALL)
 
     def _draw_scroll(self, s):
         c = self.canvas

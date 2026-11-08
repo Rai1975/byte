@@ -3,7 +3,7 @@
 Control your computer's mouse without your hands:
 
 - **Move the cursor with your eyes.** A webcam tracks where you look.
-- **Click by tapping your teeth.** A loudness sensor on your jaw, read by an Arduino, picks up the taps. One tap clicks, two double-click, and three open an action menu with right click, drag/select, scroll and zoom.
+- **Click by tapping your teeth.** A loudness sensor on your jaw, read by an Arduino, picks up the taps. One tap clicks, two double-click, and three open an action menu (right click, drag/select, scroll, zoom) that you step through with single taps and choose from with a double tap.
 - **The cursor snaps onto nearby buttons and links**, so small targets are easier to hit.
 - **Talking blocks clicks, not the cursor.** While you speak, jaw taps don't click (talking makes the jaw sensor noisy), but the cursor keeps following your eyes. Presage SmartSpectra detects the talking, and a lip-movement detector takes over if Presage isn't available.
 - **Voice agent.** Say **"byte"** and then a command ("open Chrome", "search for the weather", "volume to 30", "next tab"). While the agent is working on a command, **the cursor and the clicks are both paused**, so nothing moves under it.
@@ -158,12 +158,18 @@ Calibrate with **F8** if you haven't yet, then:
 
 ### Action menu (3 taps)
 
-A ring of four big buttons appears around the cursor. **Look at one and tap once.** Looking at the centre, tapping 2 or 3 times, or waiting 8 s cancels the menu. A blue dot shows where the app thinks you're looking.
+A ring of four big buttons appears around the cursor, with **Right click** highlighted. You pick with taps only, no aiming:
 
-| Action | What happens |
+| Taps | In the menu |
+|------|-------------|
+| **1 tap** | Move the highlight **clockwise**: Right click → Drag / select → Scroll → Zoom → Cancel (centre) → Right click … |
+| **2 taps** | **Choose** the highlighted option |
+| **3 taps** | Cancel. The menu also closes by itself 10 s after your last tap. |
+
+| Option | What happens |
 |--------|-------------|
 | **Right click** (top) | Right-clicks where you opened the menu |
-| **Drag / select** (right) | Presses the left button there. Move with your eyes, then any tap drops. Use it for drag-and-drop and for **selecting text**. |
+| **Drag / select** (right) | Presses and holds the left button there. Move with your eyes, then any tap drops. Use it for drag-and-drop, **selecting text**, or dragging a window. |
 | **Scroll** (bottom) | Look above the menu point to scroll up, below it to scroll down. Looking further scrolls faster. Any tap stops. |
 | **Zoom** (left) | Shows a 3× magnified view of the area. Look at the exact spot: 1 tap clicks it, 2 taps double-click, 3 cancel. Use it for tiny or crowded targets. |
 
@@ -172,7 +178,9 @@ A ring of four big buttons appears around the cursor. **Look at one and tap once
 - **Clicks land where you were looking just before the tap.** The app averages your gaze over the third of a second before the first tap, so the head jolt from tapping doesn't move the click.
 - **The cursor freezes** from the first tap until the click is done.
 - **Snapping (F4 toggles it):**
-  - The cursor locks onto a button, link, checkbox, tab, menu item or icon once your gaze stays within about 60 px of it for a moment.
+  - The cursor locks onto a button, link, checkbox, tab, menu item, icon, **single-line text box**, or a window's **minimize / maximize / close** button once your gaze stays within about 60 px of it for a moment.
+  - On a button the cursor sits in the centre. In a text box it slides left and right with your gaze along the box, so you can still put the caret anywhere in the text. Big multi-line text areas never snap.
+  - Minimize / maximize / close work in every window, including apps that draw their own title bar (VS Code, Chrome, Discord), which don't report those buttons to Windows. They also lock on when your gaze is a little above or beside the window, and never for a window that's covered by another one.
   - It stays locked until you look more than about 130 px away for about 0.3 s, so jitter and quick glances don't unsnap it. Moving to a neighbouring button needs a deliberate look (0.3 s) at it.
   - Over plain text it only locks when you're right on a link, so pointing at text stays free.
   - It's off while dragging, scrolling, zooming or in the menu, so text selection is never affected.

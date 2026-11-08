@@ -11,7 +11,7 @@ Pipeline
          -> 120 Hz cursor driver (pynput) that glides toward the filtered gaze point
 
 Clicks come from jaw taps on the Arduino loudness sensor (jaw_clicker.py -> actions.py):
-1 tap = click, 2 = double click, 3 = action menu (right click, drag/select, scroll, zoom).
+1 tap = click, 2 = double click, 3 = action menu (1 tap = next option clockwise, 2 = choose, 3 = cancel).
 Clicks land where you looked just before the tap, and the cursor freezes during the tap.
 The cursor snaps onto nearby buttons/links (snap.py); overlay.py draws the menu and highlights.
 
@@ -479,17 +479,16 @@ class App:
     # ------------------------------------------------------------------ taps, snapping, actions
     def _aim(self, t):
         """Where a gesture whose first tap happened at time t should land."""
-        if self.actions.mode == "normal":
-            if self.snap.current is not None:
-                return self.snap.center
-            if not self.cursor.enabled:          # eye cursor off: click wherever the mouse is
-                return tuple(self.cursor.mouse.position)
         t0, t1 = t - AIM_WINDOW_S[0], t - AIM_WINDOW_S[1]
         pts = [(x, y) for ts, x, y in self.gaze_hist if t0 <= ts <= t1]
-        if pts:
-            return tuple(np.mean(pts, axis=0))
-        if self.gaze_pt is not None:
-            return self.gaze_pt
+        looked = tuple(np.mean(pts, axis=0)) if pts else self.gaze_pt
+        if self.actions.mode == "normal":
+            if self.snap.current is not None:    # button centre, or along a text box where you looked
+                return self.snap.point(looked)
+            if not self.cursor.enabled:          # eye cursor off: click wherever the mouse is
+                return tuple(self.cursor.mouse.position)
+        if looked is not None:
+            return looked
         return tuple(self.cursor.mouse.position)
 
     def _set_last(self, label):
@@ -540,7 +539,7 @@ class App:
             self.snapper.query = None
             self.snap.reset()
         hold = self.actions.hold_point(now)
-        target = hold or self.snap.center or gaze
+        target = hold or self.snap.point(gaze) or gaze
         if target is not None:
             self.cursor.target = target
         self.actions.frame(gaze, now, paused)
