@@ -16,22 +16,32 @@ An assistive, hands-free mouse inspired by Augmental's MouthPad. One piece of so
 
 ## Repo
 
-- Remote: `https://github.com/Rai1975/makeuc.git`, working branch `feat/eye_tracking`
-- `eye-track/`: this work. `sensor/`: teammate's work, **do not modify**.
+- Remote: `https://github.com/Rai1975/makeuc.git`. Current branch is `feat/presage`.
 - Ask before pushing.
+- Restructured on 2026-11-07 into one app (`python main.py`). The teammate's `sensor/` folder is gone:
+  - `plot.py` became `tools/tap_plot.py`.
+  - `test.py` became `tools/sensor_stream.py`.
+  - `loudness.ino` moved to `arduino/loudness/`.
+  - `clicker.py` was replaced by `handsfree/jaw_clicker.py`.
+  - Tell the teammate if they ask where their files went.
 
-### `eye-track/` files
-
-| File | Purpose |
+| Path | Purpose |
 |------|---------|
-| `eye_cursor.py` | Eye-tracking cursor + live debug window. MediaPipe **Tasks** `FaceLandmarker` (VIDEO mode, blendshapes + pose matrix). Features: eye-axis-normalized iris offset, openness, head yaw/pitch → ridge quadratic regression from a 13-point calibration → One Euro filter → 120 Hz pynput cursor thread. Auto accuracy check (9 points, px/cm/deg). Hotkeys F7 toggle, F8 calibrate, F9 validate, F10 quit. Saves `calibration.json` (gitignored). |
-| `talk_detect.py` | Pause-while-talking. `PresageTalk` (spawns the Node bridge, streams frames, parses JSON lines), `LocalTalk` (MediaPipe lip-gap fallback: range > 0.028 and ≥3 open/close reversals in 0.7 s), `TalkGate` (auto: Presage if live else local; 0.7 s hold). `App.inputs_paused` gates ALL input; F6 toggles. |
-| `presage/talk_bridge.mjs` | Node bridge: stdin frames (16-byte header `<IId` w,h,tsUs + BGR) → `sdk.sendFrame` (custom input) → stdout JSON (`talking`/`status`/`error`). `presage/package.json` pins `@smartspectra/node-sdk@3.4.0`; `npm install` there (node_modules gitignored). |
-| `environment.yml` | Conda env spec (`makeuc-eye`) |
-| `face_landmarker.task` | MediaPipe model (copy of `sensor/face_landmarker.task`) |
+| `main.py` | Entry point. Flags: `--no-clicks`, `--port COMx`, `--camera N`. |
+| `handsfree/app.py` | Eye cursor + debug window + `App` (MediaPipe Tasks FaceLandmarker → features → ridge regression from a 13-point calibration → One Euro → 120 Hz pynput thread). `App.inputs_paused` gates the cursor AND the clicks. Hotkeys: F5 clicks, F6 talk-pause, F7 cursor, F8 calibrate, F9 accuracy, F10 quit. Camera runs at 640x480: this laptop only gives 30 fps at ≤640x480, and 720p drops to 5 fps, which broke Presage. |
+| `handsfree/jaw_clicker.py` | `find_port()` (Arduino VID 0x2341), `SerialTicks` (bulk serial read → ~1 ms block-average ticks carrying their real `tick_ms`), `TapDetector` (teammate's fast/slow envelope algorithm with ms-based timing: THRESHOLD 15, CLICK_GAP_MS 250), `JawClicker` thread (gestures 1/2/3 = click/double/drag; blocked + drag released while `is_paused()`). |
+| `handsfree/talk_detect.py` | `PresageTalk` (Node bridge), `LocalTalk` (lip-gap fallback), `TalkGate` (auto mode, 0.7 s hold). Reads the key from `.env` at the repo root. |
+| `presage/talk_bridge.mjs` | Node bridge: stdin frames (16-byte `<IId` header + BGR) → `sdk.sendFrame` → stdout JSON. On retryable errors it restarts with reset()+start(), max 5 per minute. `npm install` in `presage/`. |
+| `tools/tap_plot.py`, `tools/sensor_stream.py` | Testing/tuning the sensor on its own. `tap_plot.py` sends no clicks unless `--click`. |
+| `arduino/loudness/loudness.ino` | Streams analogRead(A0) with no delay. |
+| `models/face_landmarker.task`, `environment.yml` | Model and conda env spec. |
 
-Python env: conda env **`makeuc-eye`** (Python 3.12), built from `eye-track/environment.yml` (pip deps: mediapipe, opencv-python, numpy, pynput, screeninfo). Use `conda activate makeuc-eye`, or call `C:\Users\abhis\miniconda3\envs\makeuc-eye\python.exe` directly (`conda run` breaks on multi-line `-c` scripts). MediaPipe is **1.2.2, which has no `mp.solutions`** (legacy Face Mesh is gone), so use `mediapipe.tasks.python.vision`.
-The old `bite_click.py`, `mouth_click.mjs` and `package.json` were deleted on 2026-11-07 (still in git history).
+Python env: conda env **`makeuc-eye`** (Python 3.12) from `environment.yml`. Pip deps: mediapipe, opencv-python, numpy, pynput, screeninfo, pyserial, matplotlib. Call `C:\Users\abhis\miniconda3\envs\makeuc-eye\python.exe` directly (`conda run` breaks on multi-line `-c`). MediaPipe 1.2.2 has no `mp.solutions`.
+
+Sensor facts:
+- The Arduino is on **COM10** on this laptop (COM5 on the teammate's).
+- The raw rate varies a lot: about 85k readings/s with bulk reads, but about 350/s once Arduino App Lab was open. That's why ticks carry their own duration.
+- On idle data at THRESHOLD 15, a few spikes still cross the threshold. The user has not tested taps yet.
 
 ## Key decisions
 
@@ -40,15 +50,15 @@ The old `bite_click.py`, `mouth_click.mjs` and `package.json` were deleted on 20
   - Talking data is at `metrics.face.talking[]` = `{detected, stable, timestamp}`.
   - `useCustomInput()` + `sendFrame(buf,w,h,stride,PixelFormat.kBGR,tsUs)` lets Python keep the webcam, since Windows allows one camera owner.
   - Auth quirks: an empty key makes `start()` throw. A bad key lets `start()` succeed, and the session sits at "starting" until frames arrive. Then it emits `error` code 2 and status 5, and logs a 401 to stderr.
-  - **No API key yet** (2026-11-07). The bridge's real metrics path (actual `talking` messages, their latency and frequency) is untested. Only auth failures have been exercised. The local fallback is what runs now.
+  - The API key is in `.env` (gitignored) and works. Talking messages arrive about 5 times per second. Error 8 "processing failed" (retryable) is caused by a low camera fps.
 - **Click injection**: robotjs failed and `@nut-tree/nut-js` returned a 404, so use Python `pynput`.
 - **Click gesture**: the user rejected mouth-open in favor of a subtle bite. Wink/blink (false positives), eyebrow raise (tiring), and an Arduino touch-sensor switch (serial → pynput) were considered and set aside.
 
 ## Next steps
 
-1. **Current: eye → cursor only, with no clicks.** `eye_cursor.py` is built and smoke-tested (detection + debug render), but full calibration has not been run by the user yet. Run it, check the validated error, and tune it.
-2. Pause-while-talking is built (Presage + local fallback). Next, get a Presage API key into `eye-track/.env`. Run `node presage/talk_bridge.mjs --debug` to see the raw metrics, then check the talking latency. Tune the `LOCAL_*` constants with real speech.
-3. Merge cursor, bite/tap clicks (teammate's `sensor/plot.py` tap detector over serial), and speech into one app. Clicks must respect `App.inputs_paused`.
+1. The user follows the README section "2. Test each part on its own": eye calibration (F8), `tools/sensor_stream.py`, `tools/tap_plot.py` (tune THRESHOLD / CLICK_GAP_MS), then talking.
+2. Run `python main.py` and confirm that taps while talking show `blocked`.
+3. Speech-to-text is not built yet.
 
 ## Working preferences
 

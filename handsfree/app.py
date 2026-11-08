@@ -1,5 +1,6 @@
 """
-Eye-tracking cursor with a live debug visualization.
+Hands-free mouse: eye-tracking cursor + jaw-tap clicks, paused while you talk, with a live
+debug visualization. Run from the repo root:  python main.py
 
 Pipeline
   webcam -> MediaPipe FaceLandmarker (478 landmarks incl. irises, head pose, blendshapes)
@@ -9,10 +10,14 @@ Pipeline
          -> One Euro filter (low jitter when still, responsive when moving)
          -> 120 Hz cursor driver (pynput) that glides toward the filtered gaze point
 
-While the user is talking, ALL mouse input is paused (talk_detect.py: Presage TALKING metric,
-with a lip-movement fallback). Any new input (e.g. clicks) must check `App.inputs_paused`.
+Clicks come from jaw taps on the Arduino loudness sensor (jaw_clicker.py): 1 tap = click,
+2 = double click, 3 = start drag (next single tap drops).
+
+While the user is talking, ALL mouse input (cursor and clicks) is paused (talk_detect.py:
+Presage TALKING metric, with a lip-movement fallback). Any new input must check `App.inputs_paused`.
 
 Hotkeys (global, work even when another window has focus)
+  F5  toggle jaw-tap clicks on/off
   F6  toggle pause-while-talking on/off
   F7  toggle cursor control on/off
   F8  recalibrate
@@ -50,14 +55,18 @@ from mediapipe.tasks.python import BaseOptions, vision
 from pynput import keyboard as pkeyboard
 from pynput import mouse as pmouse
 
-from talk_detect import TalkGate
+from .jaw_clicker import THRESHOLD as TAP_THRESHOLD, JawClicker
+from .talk_detect import TalkGate
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-MODEL_PATH = os.path.join(HERE, "face_landmarker.task")
-CALIB_PATH = os.path.join(HERE, "calibration.json")
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # repo root
+MODEL_PATH = os.path.join(ROOT, "models", "face_landmarker.task")
+CALIB_PATH = os.path.join(ROOT, "calibration.json")
 
 # ----------------------------------------------------------------------------- tuning
-CAM_W, CAM_H, CAM_FPS = 1280, 720, 30
+# 640x480 on purpose: this laptop webcam does 30 fps only at <= 640x480 (720p drops to 5 fps,
+# which makes the cursor laggy and makes Presage fail with "processing failed").
+CAM_W, CAM_H, CAM_FPS = 640, 480, 30
+LOW_FPS_WARN = 15
 SETTLE_S = 0.9          # time to let the eyes land on a calibration dot before sampling
 COLLECT_S = 1.0         # sampling time per calibration dot
 MIN_SAMPLES = 10        # minimum good frames per dot
@@ -286,10 +295,10 @@ class CursorDriver(threading.Thread):
 
 # ============================================================================ app
 class App:
-    DBG = "Eye Tracker - debug"
-    CAL = "Eye Tracker - calibration"
+    DBG = "Hands-Free Mouse - debug"
+    CAL = "Hands-Free Mouse - calibration"
 
-    def __init__(self, cam_index):
+    def __init__(self, cam_index, port=None, clicks=True):
         self.sw, self.sh, self.width_mm = screen_info()
         self.px_per_mm = (self.sw / self.width_mm) if self.width_mm else None
 
@@ -316,9 +325,13 @@ class App:
         self.cursor = CursorDriver(self.sw, self.sh)
         self.cursor.start()
 
-        # Talking pauses ALL mouse input (cursor now; clicks must check `inputs_paused` too).
+        # Talking pauses ALL mouse input: the cursor (update_gaze) and jaw-tap clicks (is_paused).
         self.talk = TalkGate()
         self.talking = False
+        self.clicker = None
+        if clicks:
+            self.clicker = JawClicker(port, is_paused=lambda: self.inputs_paused)
+            self.clicker.start()
 
         self.keys = queue.Queue()
         self.listener = pkeyboard.Listener(on_press=self._on_global_key)
@@ -347,7 +360,7 @@ class App:
 
     # ------------------------------------------------------------------ input
     def _on_global_key(self, key):
-        names = {pkeyboard.Key.f6: "talk", pkeyboard.Key.f7: "toggle", pkeyboard.Key.f8: "calib", pkeyboard.Key.f9: "valid",
+        names = {pkeyboard.Key.f5: "clicks", pkeyboard.Key.f6: "talk", pkeyboard.Key.f7: "toggle", pkeyboard.Key.f8: "calib", pkeyboard.Key.f9: "valid",
                  pkeyboard.Key.f10: "quit", pkeyboard.Key.space: "space", pkeyboard.Key.esc: "esc"}
         if key in names:
             self.keys.put(names[key])
@@ -655,7 +668,7 @@ class App:
         s = cam_w / W
         cam_h = int(H * s)
         panel_w = 380
-        canvas_h = max(cam_h + 190, 560)
+        canvas_h = max(cam_h + 214, 560)
         canvas = np.zeros((canvas_h, cam_w + panel_w, 3), np.uint8)
         canvas[:] = C_PANEL
 
@@ -673,11 +686,13 @@ class App:
             cv2.arrowedLine(cam, tuple(nose.astype(int)), tuple(tip.astype(int)), C_YELLOW, 2, cv2.LINE_AA)
             if info["blink"] > BLINK_THRESH:
                 put(cam, "BLINK - holding", (10, cam_h - 15), 0.7, C_YELLOW, 2, bg=(0, 0, 0))
+        else:
+            put(cam, "NO FACE", (cam_w // 2 - 70, cam_h // 2), 1.0, C_RED, 2, bg=(0, 0, 0))
         if self.talking:
             cv2.rectangle(cam, (0, 0), (cam_w - 1, cam_h - 1), C_RED, 4)
             put(cam, "TALKING - INPUT PAUSED", (12, 34), 0.8, C_WHITE, 2, bg=(40, 40, 200))
-        else:
-            put(cam, "NO FACE", (cam_w // 2 - 70, cam_h // 2), 1.0, C_RED, 2, bg=(0, 0, 0))
+        if self.clicker and time.time() - self.clicker.last_t < 1.0:
+            put(cam, f"TAP: {self.clicker.last}", (12, 72), 0.7, C_WHITE, 2, bg=(30, 110, 30))
         canvas[:cam_h, :cam_w] = cam
 
         px = cam_w + 10
@@ -774,6 +789,9 @@ class App:
         ctl = "ON" if self.cursor.enabled else "OFF"
         status = f"state: {self.state}   cursor control: {ctl}   fps: {self.fps:.0f}"
         put(canvas, status, (10, ty), 0.55, C_GREEN if self.cursor.enabled else C_YELLOW)
+        if 0 < self.fps < LOW_FPS_WARN:
+            put(canvas, f"LOW CAMERA FPS ({self.fps:.0f}) - lower CAM_W/CAM_H or add light",
+                (10, cam_h - 12), 0.55, C_WHITE, 2, bg=(40, 40, 200))
         line2 = []
         if self.calib_err is not None:
             line2.append(f"calib fit err {self.calib_err:.0f}px")
@@ -792,11 +810,37 @@ class App:
                      f"Presage: {self.talk.presage_status()}   "
                      f"lips {lt.level:.3f}/{lt.reversals}")
         put(canvas, talk_line, (10, ty + 72), 0.45, C_RED if self.talking else C_GRAY)
-        put(canvas, "F6 talk-pause on/off  F7 cursor on/off  F8 calibrate  F9 accuracy  F10 quit",
-            (10, ty + 98), 0.5, C_CYAN)
+        self._draw_clicks(canvas, (10, ty + 96), canvas.shape[1])
+        put(canvas, "F5 clicks  F6 talk-pause  F7 cursor  F8 calibrate  F9 accuracy  F10 quit",
+            (10, ty + 122), 0.5, C_CYAN)
         if time.time() < self.message_until:
-            put(canvas, self.message, (10, ty + 124), 0.5, C_YELLOW)
+            put(canvas, self.message, (10, ty + 148), 0.5, C_YELLOW)
         return canvas
+
+    def _draw_clicks(self, canvas, org, width):
+        c = self.clicker
+        if c is None:
+            put(canvas, "clicks: disabled (--no-clicks)", org, 0.45, C_GRAY)
+            return
+        state = ("ON" if c.enabled else "OFF") + (" - DRAGGING" if c.dragging else "")
+        if c.status != "running":
+            text = f"clicks [{c.port or '?'}]: {c.status}"
+        else:
+            rate = f"{c.raw_rate / 1000:.0f}k/s" if c.raw_rate >= 1000 else f"{c.raw_rate:.0f}/s"
+            text = (f"clicks [{c.port} {rate}]: {state}   taps {c.det.taps}   "
+                    f"blocked {c.blocked}   last: {c.last or '-'}")
+        color = C_RED if (c.status != "running" or self.inputs_paused) else (C_GREEN if c.enabled else C_YELLOW)
+        put(canvas, text, org, 0.45, color)
+        # sparkline of the tap signal (red line = threshold), right-aligned on the same row
+        trail = list(c.sig_trail)[-150:]
+        x0, y0, w, h = width - 160, org[1] - 14, 150, 18
+        if trail:
+            top = max(TAP_THRESHOLD * 2, max(trail))
+            pts = np.array([(x0 + i * w / 150, y0 + h - min(v, top) / top * h)
+                            for i, v in enumerate(trail)], np.int32)
+            cv2.polylines(canvas, [pts], False, C_CYAN, 1, cv2.LINE_AA)
+            ly = int(y0 + h - TAP_THRESHOLD / top * h)
+            cv2.line(canvas, (x0, ly), (x0 + w, ly), C_RED, 1)
 
     # ------------------------------------------------------------------ main loop
     def run(self):
@@ -806,7 +850,13 @@ class App:
                 for ev in self._take_events():
                     if ev == "quit":
                         return
-                    if ev == "talk":
+                    if ev == "clicks":
+                        if self.clicker:
+                            self.clicker.set_enabled(not self.clicker.enabled)
+                            self.flash(f"Jaw-tap clicks {'ON' if self.clicker.enabled else 'OFF'}", 3)
+                        else:
+                            self.flash("Clicks disabled (--no-clicks)", 3)
+                    elif ev == "talk":
                         self.talk.enabled = not self.talk.enabled
                         self.flash(f"Pause-while-talking {'ON' if self.talk.enabled else 'OFF'}", 3)
                     elif ev == "toggle":
@@ -851,6 +901,8 @@ class App:
             self.cursor.alive = False
             self.listener.stop()
             self.talk.close()
+            if self.clicker:
+                self.clicker.close()
             self.cap.release()
             cv2.destroyAllWindows()
 
@@ -858,18 +910,20 @@ class App:
         ev = []
         while not self.keys.empty():
             e = self.keys.get_nowait()
-            if e in ("quit", "toggle", "calib", "valid", "talk"):
+            if e in ("quit", "toggle", "calib", "valid", "talk", "clicks"):
                 ev.append(e)
         return ev
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Webcam eye-tracking cursor")
+    ap = argparse.ArgumentParser(description="Hands-free mouse: eye cursor + jaw-tap clicks")
     ap.add_argument("--camera", type=int, default=0, help="camera index (default 0)")
+    ap.add_argument("--port", help="Arduino COM port (default: auto-detect)")
+    ap.add_argument("--no-clicks", action="store_true", help="eye cursor only, no Arduino")
     args = ap.parse_args()
     if not os.path.exists(MODEL_PATH):
         raise SystemExit(f"Missing model file: {MODEL_PATH}")
-    App(args.camera).run()
+    App(args.camera, port=args.port, clicks=not args.no_clicks).run()
 
 
 if __name__ == "__main__":
