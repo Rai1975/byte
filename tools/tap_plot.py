@@ -1,6 +1,6 @@
 """
 Live graph of the jaw-tap detector, for testing and tuning the clicker on its own.
-Uses exactly the detector in handsfree/jaw_clicker.py, so tuning changes there show up here.
+Uses exactly the detector in byte/jaw_clicker.py, so tuning changes there show up here.
 Close the window to stop.
 
     python tools/tap_plot.py             # graph + gesture labels, NO real clicks
@@ -9,7 +9,7 @@ Close the window to stop.
 
 Watch the blue signal: a tap should spike well above the red threshold line, while sitting
 still, breathing or talking should stay below it. Adjust THRESHOLD (and friends) in
-handsfree/jaw_clicker.py, then rerun.
+byte/jaw_clicker.py, then rerun.
 """
 
 import argparse
@@ -25,7 +25,7 @@ from pynput import keyboard
 from pynput.mouse import Button, Controller
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from handsfree import jaw_clicker as jc   # noqa: E402
+from byte import jaw_clicker as jc   # noqa: E402
 
 WINDOW = 3000          # ticks on screen (~1 ms each on a fast board, longer on a slow one)
 Y_MAX = 150

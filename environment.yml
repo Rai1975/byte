@@ -1,6 +1,6 @@
 # conda env create -f environment.yml          (update: conda env update -f environment.yml --prune)
-# conda activate makeuc-eye
-name: makeuc-eye
+# conda activate byte
+name: byte
 channels:
   - conda-forge
 dependencies:
@@ -12,6 +12,6 @@ dependencies:
       - numpy>=2.0
       - pynput>=1.8
       - screeninfo>=0.8
-      - pyserial>=3.5            # Arduino tap sensor (handsfree/jaw_clicker.py)
+      - pyserial>=3.5            # Arduino tap sensor (byte/jaw_clicker.py)
       - matplotlib>=3.8          # tools/tap_plot.py graph
-      - uiautomation>=2.0        # snap to buttons (handsfree/snap.py)
+      - uiautomation>=2.0        # snap to buttons (byte/snap.py)

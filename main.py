@@ -1,4 +1,4 @@
-"""Hands-free mouse. Run from the repo root:
+"""Byte: hands-free computer control. Run from the repo root:
 
     python main.py                 # eye cursor + jaw-tap clicks + voice agent
     python main.py --no-clicks     # eye cursor only (no Arduino)
@@ -7,7 +7,7 @@
     python main.py --camera 1      # another webcam
 """
 
-from handsfree.app import main
+from byte.app import main
 
 if __name__ == "__main__":
     main()

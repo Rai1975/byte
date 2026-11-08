@@ -1,8 +1,8 @@
 {
-  "name": "presage-talk-bridge",
+  "name": "byte-presage-bridge",
   "version": "1.0.0",
   "private": true,
-  "description": "Presage SmartSpectra talking detection, fed with frames from handsfree/app.py",
+  "description": "Presage SmartSpectra talking detection, fed with frames from byte/app.py",
   "type": "module",
   "main": "talk_bridge.mjs",
   "dependencies": {
