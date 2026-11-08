@@ -1,0 +1,11 @@
+anthropic==2.6.0
+comtypes==1.4.17
+faster-whisper==1.2.1
+numpy==2.5.4
+onnxruntime==1.31.1
+openwakeword==0.6.0
+pillow==13.0.0
+psutil==7.2.2
+pycaw==20260927
+pywin32==312
+sounddevice==0.5.6
