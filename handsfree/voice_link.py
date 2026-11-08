@@ -26,6 +26,9 @@ PORT = int(os.environ.get("CONTROL_PORT", 8765))
 POLL_S = 0.1
 STALE_S = 1.0          # no answer for this long -> treat as not busy (a crashed agent never freezes you)
 MAX_BUSY_S = 40.0      # busy longer than this -> assume it's stuck and stop pausing input
+HOLD_AFTER_S = 1.0           # keep pausing this long after a normal command finishes
+HOLD_AFTER_DICTATION_S = 4.0 # ...and this long after a dictation ("write this down") command, so the typed
+                             # text lands before any click can move focus away from the text box
 
 
 class VoiceLink(threading.Thread):
@@ -39,20 +42,42 @@ class VoiceLink(threading.Thread):
         self.phase = ""                   # recording | transcribing | acting while busy
         self._busy = False
         self._busy_since = None
+        self._busy_end = None             # when the last command finished (for the cooldown tail)
+        self.dictation = False            # the current/last command is dictation (agent says so)
+        self._hold_s = HOLD_AFTER_S       # cooldown for the command that just finished
         self._last_ok = 0.0
         self.commands = 0                 # commands handled since start
         self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))  # never via a proxy
 
     # ------------------------------------------------------------------ public
     @property
+    def working(self):
+        """The agent itself says it's handling a command right now."""
+        now = time.time()
+        return (self._busy and now - self._last_ok <= STALE_S
+                and now - self._busy_since < MAX_BUSY_S)
+
+    @property
+    def cooldown_left(self):
+        """Seconds left of the HOLD_AFTER_S pause after the last command finished (0 if none)."""
+        if self._busy_end is None:
+            return 0.0
+        return max(0.0, self._hold_s - (time.time() - self._busy_end))
+
+    @property
     def busy(self):
-        if not self._busy or time.time() - self._last_ok > STALE_S:
-            return False
-        return time.time() - self._busy_since < MAX_BUSY_S
+        """True while the agent works AND for HOLD_AFTER_S after it finishes: pause all input."""
+        return self.working or self.cooldown_left > 0
+
+    def phase_label(self):
+        mode = "dictation mode, " if self.dictation else ""
+        if self.working:
+            return mode + (self.phase or "working")
+        return f"{mode}cooldown {self.cooldown_left:.1f}s"
 
     def label(self):
         if self.busy:
-            return f"BUSY ({self.phase})"
+            return f"BUSY ({self.phase_label()})"
         return self.state or self.status
 
     def close(self):
@@ -74,6 +99,8 @@ class VoiceLink(threading.Thread):
         while self.alive:
             st = self._poll()
             if st is None:
+                if self._busy:                # died mid-command: still give the cooldown
+                    self._end_command()
                 self._busy = False
                 if self.proc is not None and self.proc.poll() is not None:
                     self.status = f"exited (code {self.proc.returncode}) - see voice_agent/logs"
@@ -82,13 +109,26 @@ class VoiceLink(threading.Thread):
             else:
                 was = self._busy
                 self._busy = bool(st.get("busy"))
+                if self._busy:
+                    self.dictation = self.dictation or bool(st.get("dictation"))   # sticky for this command
+                elif was:
+                    self.dictation = self.dictation or bool(st.get("dictation"))
                 self.phase = st.get("phase", "")
                 self.state = st.get("state", "")
                 self.status = "running"
                 if self._busy and not was:
                     self._busy_since = time.time()
+                    self._busy_end = None
+                    self.dictation = bool(st.get("dictation"))
                     self.commands += 1
+                elif was and not self._busy:
+                    self._end_command()
             time.sleep(POLL_S)
+
+    def _end_command(self):
+        """The agent is COMPLETELY done (busy went false): start the cooldown for this command."""
+        self._hold_s = HOLD_AFTER_DICTATION_S if self.dictation else HOLD_AFTER_S
+        self._busy_end = time.time()
 
     def _start(self):
         if not os.path.exists(AGENT_PY):

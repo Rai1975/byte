@@ -6,9 +6,10 @@ and publishes the clickable elements it finds. SnapLogic (main thread) decides w
 cursor should lock onto one of them:
 
   - snap IN when the gaze comes within SNAP_IN_PX of a target's edge for SNAP_DWELL_S
-  - stay snapped until the gaze goes more than SNAP_OUT_PX from it (hysteresis: jitter
-    doesn't unsnap you, a deliberate look away does)
-  - switch to another target only when the gaze is right on top of it for SNAP_DWELL_S
+    (a brief flick out of the zone, up to PENDING_GRACE_S, doesn't restart the dwell)
+  - stay snapped until the gaze has been more than SNAP_OUT_PX from it for RELEASE_S
+    (hysteresis in space and time: jitter doesn't unsnap you, a deliberate look away does)
+  - switch to another target only when the gaze is right on top of it for SWITCH_DWELL_S
   - when the gaze is on plain text (documents, text boxes, page text) the capture zone
     shrinks to the target itself, so you can still point at text freely
   - very large elements (full-width list rows, big panels) never snap
@@ -21,9 +22,12 @@ import threading
 import time
 
 # ----------------------------------------------------------------------------- tuning
-SNAP_IN_PX = 45          # capture distance from a target's edge
-SNAP_OUT_PX = 90         # release distance (must be > SNAP_IN_PX)
-SNAP_DWELL_S = 0.12      # gaze must stay on a candidate this long before snapping/switching
+SNAP_IN_PX = 60          # capture distance from a target's edge
+SNAP_OUT_PX = 130        # release distance (must be > SNAP_IN_PX)
+SNAP_DWELL_S = 0.12      # gaze must stay near a candidate this long before snapping
+SWITCH_DWELL_S = 0.30    # ...and right on top of a different one this long to switch to it
+RELEASE_S = 0.30         # gaze must stay beyond SNAP_OUT_PX this long before unsnapping
+PENDING_GRACE_S = 0.15   # while not snapped, a candidate survives this long out of the zone while dwelling
 MAX_TARGET_W = 420       # bigger elements are not snap targets
 MAX_TARGET_H = 160
 PROBE_R = 50             # UIA is probed at the gaze point and 8 points this far around it
@@ -118,7 +122,8 @@ class SnapLogic:
 
     def reset(self):
         self.current = None        # (rect, type) we're snapped to
-        self.pending = None        # (rect, type, since)
+        self.pending = None        # [rect, type, since, last_seen]
+        self.out_since = None      # when the gaze left the current target's SNAP_OUT_PX zone
 
     @property
     def center(self):
@@ -127,8 +132,15 @@ class SnapLogic:
     def update(self, gaze, result, now):
         cands, on_text, _ = result
         cur = self.current
-        if cur and rect_dist(gaze, cur[0]) > SNAP_OUT_PX:
-            self.current = cur = None
+        if cur:
+            if rect_dist(gaze, cur[0]) > SNAP_OUT_PX:
+                if self.out_since is None:
+                    self.out_since = now
+                elif now - self.out_since >= RELEASE_S:
+                    self.current = cur = None
+                    self.out_since = None
+            else:
+                self.out_since = None
         margin = 0.0 if on_text else SNAP_IN_PX
         best, best_d = None, 1e9
         for rect, typ in cands:
@@ -142,11 +154,14 @@ class SnapLogic:
             score = d + area * 1e-6            # tie-break: smaller target wins
             if score < best_d:
                 best, best_d = (rect, typ), score
+        pend = self.pending
         if best is None:
-            self.pending = None
-        elif self.pending and self.pending[0] == best[0]:
-            if now - self.pending[2] >= SNAP_DWELL_S:
-                self.current, self.pending = best, None
+            if pend and (cur is not None or now - pend[3] > PENDING_GRACE_S):
+                self.pending = None        # switching needs a continuous look; grace only for the first snap
+        elif pend and pend[0] == best[0]:
+            pend[3] = now
+            if now - pend[2] >= (SWITCH_DWELL_S if cur else SNAP_DWELL_S):
+                self.current, self.pending, self.out_since = best, None, None
         else:
-            self.pending = (best[0], best[1], now)
+            self.pending = [best[0], best[1], now, now]
         return self.center

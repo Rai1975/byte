@@ -382,11 +382,21 @@ def tool_specs():
 CONFIRM_REQUIRED = set()     # tools listed here need a spoken "confirm" within 5 s (none right now)
 
 
+# Called with the tool name just before any tool runs (agent.py uses it to flag dictation).
+ON_TOOL = None
+DICTATION_TOOLS = {"type_text"}
+
+
 def run_tool(name, args, confirmer=None):
     """Run one tool. Never raises: returns (ok, message).
     `confirmer(description) -> bool` asks the user to say "confirm" (see agent.py)."""
     if name not in REGISTRY:
         return False, f"unknown tool '{name}'"
+    if ON_TOOL is not None:
+        try:
+            ON_TOOL(name)
+        except Exception:
+            pass
     try:
         if name in CONFIRM_REQUIRED:
             if confirmer is None:

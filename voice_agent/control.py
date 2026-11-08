@@ -6,7 +6,8 @@ can control the agent.
     POST http://127.0.0.1:8765/trigger   -> push-to-talk: start listening now, no wake word
     GET  http://127.0.0.1:8765/status    -> {"state": "listening" | "sleeping",
                                              "busy": true while handling a command,
-                                             "phase": "" | "recording" | "transcribing" | "acting"}
+                                             "phase": "" | "recording" | "transcribing" | "acting",
+                                             "dictation": true if this (or the last) command types text}
 
 Every POST needs the header  X-Voice-Agent: 1 . Browsers cannot send that header cross-site
 without a CORS preflight (which we never allow), so a web page cannot poke the agent.

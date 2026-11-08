@@ -16,15 +16,17 @@ Clicks land where you looked just before the tap, and the cursor freezes during 
 The cursor snaps onto nearby buttons/links (snap.py); overlay.py draws the menu and highlights.
 
 Pausing (any new input must respect these):
-  App.clicks_paused  - the voice agent is BUSY. Talking on its own does NOT block clicks: talk
-                       detection (talk_detect.py) is shown in the debug window for information only.
+  App.clicks_paused  - the user is talking (talk_detect.py: Presage TALKING, lip-movement fallback)
+                       OR the voice agent is busy. Jaw taps do nothing. Talking leaves the cursor live.
   App.cursor_paused  - the voice agent (voice_link.py -> voice_agent/) is handling a command, from
-                       its wake word until it's done. Cursor freezes, any drag/menu/scroll is dropped.
+                       its wake word until it's completely done + a cooldown (1 s, or 4 s after
+                       dictation, voice_link.HOLD_AFTER_S / HOLD_AFTER_DICTATION_S).
+                       Cursor freezes, any drag/menu/scroll is dropped, debug-window keys are ignored.
 
 Hotkeys (global, work even when another window has focus)
   F4  toggle snapping to buttons on/off
   F5  toggle jaw-tap clicks on/off
-  F6  toggle talk detection (display only) on/off
+  F6  toggle pause-clicks-while-talking on/off
   F7  toggle cursor control on/off
   F8  recalibrate
   F9  run accuracy validation
@@ -336,7 +338,7 @@ class App:
         self.cursor = CursorDriver(self.sw, self.sh)
         self.cursor.start()
 
-        # Talk detection: shown in the debug window only; it does not block anything.
+        # Talking blocks jaw-tap clicks (the cursor keeps following your eyes).
         self.talk = TalkGate()
         self.talking = False
         # The voice agent handling a command pauses everything (cursor + clicks).
@@ -446,11 +448,11 @@ class App:
 
     @property
     def clicks_paused(self):
-        """True only while the voice agent is BUSY: jaw taps must not click. Talking alone doesn't count."""
-        return self.voice_busy
+        """True while talking or while the voice agent is busy: jaw taps must not click."""
+        return self.talking or self.voice_busy
 
     def _pause_reason(self):
-        return "voice agent"
+        return "voice agent" if self.voice_busy else "talking"
 
     def update_gaze(self, info, now):
         self.cursor.paused = self.cursor_paused
@@ -458,7 +460,11 @@ class App:
             return
         self.iris_trail.append((info["ix"], info["iy"]))
         if self.cursor_paused:
-            return  # voice agent acting: freeze the cursor
+            self._resume_clean = True
+            return  # voice agent acting (or cooling down): freeze the cursor
+        if getattr(self, "_resume_clean", False):    # restart smoothing from here, no lurch from old state
+            self._resume_clean = False
+            self.filter.reset()
         if info["blink"] > BLINK_THRESH:
             return  # hold position through blinks
         raw = self.model.predict(info["feat"])
@@ -814,10 +820,11 @@ class App:
             put(cam, "NO FACE", (cam_w // 2 - 70, cam_h // 2), 1.0, C_RED, 2, bg=(0, 0, 0))
         if self.voice_busy:
             cv2.rectangle(cam, (0, 0), (cam_w - 1, cam_h - 1), C_MAGENTA, 4)
-            put(cam, f"VOICE AGENT ({self.voice.phase}) - ALL INPUT PAUSED", (12, 34), 0.7, C_WHITE, 2,
+            put(cam, f"VOICE AGENT ({self.voice.phase_label()}) - ALL INPUT PAUSED", (12, 34), 0.7, C_WHITE, 2,
                 bg=(140, 40, 140))
         elif self.talking:
-            put(cam, "talking", (12, 34), 0.6, C_WHITE, 1, bg=(80, 80, 80))
+            cv2.rectangle(cam, (0, 0), (cam_w - 1, cam_h - 1), C_RED, 4)
+            put(cam, "TALKING - CLICKS PAUSED", (12, 34), 0.8, C_WHITE, 2, bg=(40, 40, 200))
         if time.time() - self.last_action_t < 1.0:
             put(cam, f"TAP: {self.last_action}", (12, 72), 0.7, C_WHITE, 2, bg=(30, 110, 30))
         canvas[:cam_h, :cam_w] = cam
@@ -944,7 +951,7 @@ class App:
         voice_line = f'voice agent: {v.label()}   commands {v.commands}   (say "byte", then a command)'
         put(canvas, voice_line, (10, ty + 120), 0.45,
             C_MAGENTA if self.voice_busy else (C_GREEN if v.status == "running" else C_GRAY))
-        put(canvas, "F4 snap  F5 clicks  F6 talk-detect  F7 cursor  F8 calib  F9 accuracy  F10 quit",
+        put(canvas, "F4 snap  F5 clicks  F6 talk-pause  F7 cursor  F8 calib  F9 accuracy  F10 quit",
             (10, ty + 146), 0.5, C_CYAN)
         if time.time() < self.message_until:
             put(canvas, self.message, (10, ty + 172), 0.5, C_YELLOW)
@@ -999,7 +1006,7 @@ class App:
                             self.flash("Clicks disabled (--no-clicks)", 3)
                     elif ev == "talk":
                         self.talk.enabled = not self.talk.enabled
-                        self.flash(f"Talk detection (display only) {'ON' if self.talk.enabled else 'OFF'}", 3)
+                        self.flash(f"Pause clicks while talking {'ON' if self.talk.enabled else 'OFF'}", 3)
                     elif ev == "toggle":
                         if self.model.ready:
                             self.cursor.set_enabled(not self.cursor.enabled)
@@ -1034,6 +1041,8 @@ class App:
                 self.open_debug(canvas.shape)
                 cv2.imshow(self.DBG, canvas)
                 k = cv2.waitKey(1) & 0xFF
+                if self.voice_busy:
+                    k = 0xFF     # the agent may be typing into this window: never treat it as q/[/]/-/=
                 if k == ord("q"):
                     return
                 if k == ord("["):

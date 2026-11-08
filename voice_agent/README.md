@@ -76,7 +76,7 @@ python agent.py --call-tool set_volume level=30              # one tool, no Clau
 
 `POST http://127.0.0.1:8765/pause | /resume | /trigger`, `GET /status`. POSTs need the header `X-Voice-Agent: 1`. `/trigger` is push-to-talk: it starts recording immediately with no wake word, so a jaw clench could replace the wake word (not wired up yet).
 
-`GET /status` returns `{"state": "listening"|"sleeping", "busy": bool, "phase": ""|"recording"|"transcribing"|"acting"}`. `busy` is true from the wake word until the command is done. `handsfree/voice_link.py` polls it and pauses the eye cursor and jaw clicks while it's true.
+`GET /status` returns `{"state": "listening"|"sleeping", "busy": bool, "phase": ""|"recording"|"transcribing"|"acting", "dictation": bool}`. `busy` is true from the wake word until the command is completely done. `dictation` turns on (and is logged as `dictation mode`) when the transcript starts with write/type/dictate/note or when `type_text` runs, and stays on until the next command starts. `handsfree/voice_link.py` polls this and pauses the eye cursor and jaw clicks while `busy`, then for 1 s more, or 4 s after a dictation command.
 
 ```python
 import urllib.request

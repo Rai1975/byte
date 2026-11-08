@@ -5,7 +5,7 @@ Control your computer's mouse without your hands:
 - **Move the cursor with your eyes.** A webcam tracks where you look.
 - **Click by tapping your teeth.** A loudness sensor on your jaw, read by an Arduino, picks up the taps. One tap clicks, two double-click, and three open an action menu with right click, drag/select, scroll and zoom.
 - **The cursor snaps onto nearby buttons and links**, so small targets are easier to hit.
-- **Talking never gets in the way.** You can talk normally while pointing and clicking. Talking is detected (Presage SmartSpectra, with a lip-movement fallback) and shown in the debug window, but it doesn't block anything on its own.
+- **Talking blocks clicks, not the cursor.** While you speak, jaw taps don't click (talking makes the jaw sensor noisy), but the cursor keeps following your eyes. Presage SmartSpectra detects the talking, and a lip-movement detector takes over if Presage isn't available.
 - **Voice agent.** Say **"byte"** and then a command ("open Chrome", "search for the weather", "volume to 30", "next tab"). While the agent is working on a command, **the cursor and the clicks are both paused**, so nothing moves under it.
 
 Everything runs as one program: `python main.py`. It starts the voice agent in the background for you.
@@ -126,11 +126,11 @@ Tuning lives at the top of [handsfree/jaw_clicker.py](handsfree/jaw_clicker.py):
 
 Rerun after each change. The main app uses the same settings.
 
-### d) Talk detection
+### d) Clicks blocked while talking
 
 Run `python main.py --no-voice` and talk while tapping.
-- A small grey `talking` label appears on the camera view.
-- **Clicks and the cursor keep working.** Talking on its own blocks nothing.
+- The camera view gets a red border and a **TALKING - CLICKS PAUSED** banner.
+- **The cursor keeps following your eyes.** Taps show up as `blocked: talking` and don't click, until about 0.7 s after you stop.
 - The `talk detect [...]` line shows which detector is active (`presage` or `local`) and the Presage status, for example `running`, `no API key` or `auth failed`.
 
 ### e) Voice agent
@@ -153,8 +153,8 @@ Calibrate with **F8** if you haven't yet, then:
 | 1 tap | Left click |
 | 2 quick taps | Double click |
 | 3 quick taps | **Action menu** at the cursor (see below) |
-| Talk | Nothing changes: the cursor and taps keep working. |
-| Say "byte" + a command | The voice agent does it. Cursor **and** taps pause until it's done, and any menu, drag, scroll or zoom is cancelled. |
+| Talk | Taps are ignored. The cursor keeps moving. |
+| Say "byte" + a command | The voice agent does it. Cursor **and** taps pause until it's completely done **plus 1 s**, or **plus 4 s for dictation** ("write this down: ...", "type ..."), so typed text lands before anything can click away from the text box. Any menu, drag, scroll or zoom is cancelled. |
 
 ### Action menu (3 taps)
 
@@ -172,25 +172,26 @@ A ring of four big buttons appears around the cursor. **Look at one and tap once
 - **Clicks land where you were looking just before the tap.** The app averages your gaze over the third of a second before the first tap, so the head jolt from tapping doesn't move the click.
 - **The cursor freezes** from the first tap until the click is done.
 - **Snapping (F4 toggles it):**
-  - The cursor locks onto a button, link, checkbox, tab, menu item or icon once your gaze comes within about 45 px of it.
-  - It stays locked until you look more than about 90 px away, so jitter doesn't unsnap it.
+  - The cursor locks onto a button, link, checkbox, tab, menu item or icon once your gaze stays within about 60 px of it for a moment.
+  - It stays locked until you look more than about 130 px away for about 0.3 s, so jitter and quick glances don't unsnap it. Moving to a neighbouring button needs a deliberate look (0.3 s) at it.
   - Over plain text it only locks when you're right on a link, so pointing at text stays free.
   - It's off while dragging, scrolling, zooming or in the menu, so text selection is never affected.
-  - Tune it with `SNAP_IN_PX`, `SNAP_OUT_PX` and `SNAP_DWELL_S` in [handsfree/snap.py](handsfree/snap.py).
+  - Tune it with `SNAP_IN_PX`, `SNAP_OUT_PX`, `RELEASE_S` and `SWITCH_DWELL_S` in [handsfree/snap.py](handsfree/snap.py).
 
 ### Voice commands
 
 Say **"byte"** (or "hey byte"), then the command straight away. Examples: "open Chrome", "close Notepad", "go to youtube.com", "search for MakeUC", "next tab", "close tab", "volume to 30", "mute", "brightness 60", "take a screenshot", "minimize everything". "Byte, stop listening" puts it to sleep and "byte, resume" wakes it. Full list: [voice_agent/README.md](voice_agent/README.md).
 
 **Check the integration.**
-- Talk while tapping. The taps still click.
+- Talk while tapping. Taps appear as `last: SINGLE (blocked: talking)` and the `blocked` count goes up, but no click happens. The cursor still moves.
+- Click into Notepad, then say "byte, write this down: hello world". The banner shows `dictation mode`, and input stays paused until 4 s after the text is typed.
 - Say "byte, open Calculator" while looking around and tapping. The cursor stays put and taps show up as `blocked: voice agent` until Calculator opens.
 
 | Key (global) | Action |
 |-----|--------|
 | F4  | Snap to buttons on/off |
 | F5  | Jaw-tap clicks on/off |
-| F6  | Talk detection on/off (display only) |
+| F6  | Pause-clicks-while-talking on/off |
 | F7  | Cursor control on/off |
 | F8  | Calibrate |
 | F9  | Accuracy check |
@@ -208,7 +209,7 @@ The function keys still reach the window you're in (F5 also refreshes a browser 
   - Eye outlines, irises and a head-direction arrow.
   - `BLINK` means the cursor is holding still.
   - A green `TAP: ...` banner shows what each gesture did (`CLICK`, `MENU`, `RIGHT CLICK`, `DROP`...).
-  - A grey `talking` label means talking was detected (nothing is paused). A magenta border means the voice agent is busy (cursor and clicks paused).
+  - A red border means talking (clicks paused, cursor live). A magenta border means the voice agent is busy or cooling down (cursor and clicks paused); it says `dictation mode` for typing commands.
 - **Eyes (zoomed) / iris offset:** the raw signal that drives the cursor.
 - **Screen:** a minimap of your monitor. Red is the raw gaze estimate, green is smoothed, and the white cross is the actual cursor.
 - **Status lines:**
@@ -216,7 +217,7 @@ The function keys still reach the window you're in (F5 also refreshes a browser 
   - Calibration error.
   - Smoothing.
   - The talk detector.
-  - A **clicks** line: port, readings/s, on/off, total taps, taps blocked by the voice agent, and the last gesture, with a mini graph of the tap signal (the red line is the threshold).
+  - A **clicks** line: port, readings/s, on/off, total taps, taps blocked by talking or the voice agent, and the last gesture, with a mini graph of the tap signal (the red line is the threshold).
   - A **voice agent** line: `loading...`, `listening`, `sleeping`, or `BUSY (recording / transcribing / acting)`, and how many commands it has handled.
 
 ## How it works
@@ -240,16 +241,16 @@ The function keys still reach the window you're in (F5 also refreshes a browser 
 2. Clickable elements become candidates. Huge elements, like full-width list rows, are skipped.
 3. The cursor locks onto the nearest candidate after a short dwell, using the in/out zones described above.
 
-**Talk detection**
+**Talk pause (clicks only)**
 1. Webcam frames are piped to a small Node process that runs the Presage SmartSpectra `TALKING` metric.
 2. The bridge restarts Presage automatically if it hits a recoverable error.
 3. If Presage isn't available, a detector that counts lip open/close cycles is used instead.
-4. It's shown in the debug window only. Clicks are blocked only while the voice agent is busy (`App.clicks_paused`).
+4. Either way, `App.clicks_paused` blocks the jaw taps while you talk. The cursor isn't affected.
 
 **Voice agent**
 1. `main.py` starts `voice_agent/agent.py` with its own venv in the background, or uses the one already running (for example, from the autostart task).
 2. Wake word ("byte") → record until you stop → Whisper on the GPU → common commands run instantly, the rest go to Claude, which calls tools (open apps, URLs, keys, volume...).
-3. The agent reports `busy` on `http://127.0.0.1:8765/status` from the wake word until the command is done. The app checks it 10 times a second, and `App.cursor_paused` freezes the cursor while it's busy.
+3. The agent reports `busy` on `http://127.0.0.1:8765/status` from the wake word until the command is done. The app checks it 10 times a second and pauses the cursor and clicks while it's busy, plus a cooldown once it's completely done: 1 s normally, 4 s in **dictation mode** (`HOLD_AFTER_S` / `HOLD_AFTER_DICTATION_S` in [handsfree/voice_link.py](handsfree/voice_link.py)). The agent reports dictation mode as soon as the transcript starts with write/type/dictate/note, and whenever it runs its typing tool. Debug-window keys are ignored then too, in case the agent types into that window.
 4. If the agent stops answering or stays busy for over 40 s, the app stops pausing, so you never get stuck.
 
 ## Tips for accuracy
