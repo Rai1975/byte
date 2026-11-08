@@ -1,4 +1,4 @@
-// Presage SmartSpectra talking detector, driven by frames piped in from eye_cursor.py.
+// Presage SmartSpectra talking detector, driven by frames piped in from handsfree/app.py.
 //
 // Python owns the webcam (Windows only lets one process open it), so frames come in on stdin:
 //   header (16 bytes, little endian): u32 width, u32 height, f64 timestampUs

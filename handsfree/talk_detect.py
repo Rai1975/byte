@@ -4,7 +4,7 @@ Talking detection, used to pause all mouse input while the user speaks.
 Two detectors:
   PresageTalk  Presage SmartSpectra TALKING metric. The SDK is Node-only, so a small Node process
                (presage/talk_bridge.mjs) receives our webcam frames over stdin and reports back.
-               Needs PRESAGE_API_KEY (env var or eye-track/.env) and `npm install` in presage/.
+               Needs PRESAGE_API_KEY (env var or .env in the repo root) and `npm install` in presage/.
   LocalTalk    Fallback built on the MediaPipe landmarks we already compute: the lips repeatedly
                opening and closing within a short window counts as talking.
 
@@ -24,8 +24,8 @@ from collections import deque
 import cv2
 import numpy as np
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-BRIDGE_DIR = os.path.join(HERE, "presage")
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # repo root
+BRIDGE_DIR = os.path.join(ROOT, "presage")
 BRIDGE = os.path.join(BRIDGE_DIR, "talk_bridge.mjs")
 
 # ----------------------------------------------------------------------------- tuning
@@ -47,7 +47,7 @@ def load_api_key():
     key = os.environ.get("PRESAGE_API_KEY")
     if key:
         return key.strip()
-    env = os.path.join(HERE, ".env")
+    env = os.path.join(ROOT, ".env")
     if os.path.exists(env):
         with open(env) as f:
             for line in f:
@@ -78,13 +78,13 @@ class PresageTalk:
         key = load_api_key()
         node = shutil.which("node")
         if not key:
-            self.status = "no API key (set PRESAGE_API_KEY or eye-track/.env)"
+            self.status = "no API key (set PRESAGE_API_KEY or .env)"
             return
         if not node:
             self.status = "node not found on PATH"
             return
         if not os.path.isdir(os.path.join(BRIDGE_DIR, "node_modules", "@smartspectra")):
-            self.status = "SDK missing: run `npm install` in eye-track/presage"
+            self.status = "SDK missing: run `npm install` in presage/"
             return
 
         env = dict(os.environ, PRESAGE_API_KEY=key)
