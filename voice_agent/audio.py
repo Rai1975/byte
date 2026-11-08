@@ -157,10 +157,11 @@ class NoiseFloor:
         return max(self.value * config.SPEECH_FACTOR, config.MIN_SPEECH_RMS)
 
 
-def record_command(mic, floor, max_s=None, no_speech_s=None, preroll=()):
-    """Record until SILENCE_S of quiet after speech. Returns float32 audio or None if no speech."""
+def record_command(mic, floor, max_s=None, no_speech_s=None, preroll=(), silence_s=None):
+    """Record until silence_s (default SILENCE_S) of quiet after speech. Returns float32 audio or None if no speech."""
     max_s = max_s or config.MAX_RECORD_S
     no_speech_s = no_speech_s or config.NO_SPEECH_TIMEOUT_S
+    silence_s = silence_s or config.SILENCE_S
     thr = floor.threshold
     frames, spoke, quiet = [], False, 0.0
     t0 = time.time()
@@ -173,7 +174,7 @@ def record_command(mic, floor, max_s=None, no_speech_s=None, preroll=()):
             spoke, quiet = True, 0.0
         else:
             quiet += frame_s
-            if spoke and quiet >= config.SILENCE_S:
+            if spoke and quiet >= silence_s:
                 break
             if not spoke and time.time() - t0 > no_speech_s:
                 return None
@@ -215,7 +216,7 @@ class Transcriber:
             self.device = "cpu"
         log.info("whisper ready on %s", self.device)
 
-    def __call__(self, audio):
+    def __call__(self, audio, hint=config.WHISPER_HINT):
         segs, _ = self.model.transcribe(audio, language="en", beam_size=config.WHISPER_BEAM, vad_filter=True,
-                                        initial_prompt=config.WHISPER_HINT, condition_on_previous_text=False)
+                                        initial_prompt=hint, condition_on_previous_text=False)
         return " ".join(s.text.strip() for s in segs).strip()

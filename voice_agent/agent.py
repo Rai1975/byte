@@ -4,6 +4,7 @@
     python agent.py --list-devices     show microphones
     python agent.py --test-wake        live wake-word scores + mic level, for tuning
     python agent.py --text "mute"      run the Claude+tools path without audio
+    python agent.py --text "write this down um ..." [--paste]   test dictation cleanup (and paste)
     python agent.py --call-tool NAME key=value ...   run one tool directly (no Claude), e.g. set_volume level=30
     python agent.py --fast             use the fast model (Haiku)
 """
@@ -22,6 +23,7 @@ import os
 os.environ.setdefault("HF_HUB_DISABLE_SYMLINKS_WARNING", "1")
 
 import config
+import dictate
 
 log = logging.getLogger("voice_agent")
 
@@ -82,7 +84,9 @@ class Agent:
         """Called the instant the wake word is heard. No sound is played first: the mic queue
         already holds whatever was said right after the wake word, and recording starts from it."""
         from audio import beep, record_command
+        import win32gui
         t0 = time.time()
+        target = win32gui.GetForegroundWindow()      # where dictated text will be pasted
         audio = record_command(mic, floor)
         t1 = time.time()
         if audio is None:
@@ -110,6 +114,15 @@ class Agent:
             beep("sleep")
         elif matches(text, RESUME_PHRASES):
             beep("resume")
+        elif dictate.split_trigger(text) is not None:
+            try:
+                ok = self.dictate(mic, floor, transcribe, brain, audio, text, target)
+            except Exception:
+                log.exception("dictation failure")
+                ok = False
+            beep("ok" if ok else "fail")
+            log.info("timing: listen %.1fs | first speech-to-text %.1fs | dictation total %.1fs",
+                     t1 - t0, t2 - t1, time.time() - t2)
         else:
             try:
                 ok, summary = brain.run(text, lambda what: self.ask_confirm(mic, floor, transcribe, what))
@@ -120,6 +133,35 @@ class Agent:
             beep("ok" if ok else "fail")
             log.info("timing: listen %.1fs | speech-to-text %.1fs | claude+tools %.1fs",
                      t1 - t0, t2 - t1, time.time() - t2)
+
+    def dictate(self, mic, floor, transcribe, brain, first_audio, first_text, target):
+        """"write this down [text]": keep recording until a long pause, clean up with Claude, paste.
+        Text said in the same breath as the trigger counts. The mic queue kept filling while the
+        first part was transcribed, so nothing said in between is lost."""
+        import numpy as np
+        from audio import record_command
+        inline = dictate.split_trigger(first_text)
+        log.info("dictation started%s", f" (inline: {inline!r})" if inline else "")
+        more = record_command(mic, floor, max_s=config.DICTATION_MAX_S, silence_s=config.DICTATION_SILENCE_S,
+                              no_speech_s=config.DICTATION_SILENCE_S if inline else config.DICTATION_START_S)
+        if more is None:
+            raw = inline
+        else:
+            # Transcribe both parts together so sentences that span the first pause stay coherent.
+            whole = transcribe(np.concatenate([first_audio, more]), hint=config.DICTATION_HINT)
+            raw = dictate.split_trigger(whole)
+            if raw is None:                       # trigger heard differently the second time
+                raw = f"{inline} {transcribe(more, hint=config.DICTATION_HINT)}".strip()
+        log.info("dictation heard: %r", raw)
+        if not raw:
+            log.info("nothing dictated")
+            return False
+        text = dictate.clean(brain.client, config.DICTATION_MODEL, raw)
+        log.info("dictation cleaned: %r", text)
+        if not text:
+            return False
+        log.info("dictation: %s", dictate.paste(text, target))
+        return True
 
     def ask_confirm(self, mic, floor, transcribe, what):
         """Triple beep, then 5 s to say "confirm". Anything else (or silence) cancels."""
@@ -221,6 +263,7 @@ def main():
     ap.add_argument("--text", metavar="COMMAND")
     ap.add_argument("--call-tool", nargs="+", metavar="NAME [key=value ...]")
     ap.add_argument("--yes", action="store_true", help="with --text: pre-confirm actions that need a spoken confirm (testing)")
+    ap.add_argument("--paste", action="store_true", help='with --text "write this down ...": paste the result into the focused window after 3 s')
     ap.add_argument("--fast", action="store_true", help=f"use {config.FAST_MODEL}")
     ap.add_argument("--model", help="override the Claude model")
     a = ap.parse_args()
@@ -246,6 +289,20 @@ def main():
                 except ValueError:
                     args[k] = v
         print(tools.run_tool(a.call_tool[0], args))
+        return
+    if a.text and dictate.split_trigger(a.text) is not None:
+        from brain import Brain
+        raw = dictate.split_trigger(a.text)
+        try:
+            text = dictate.clean(Brain(model).client, a.model or config.DICTATION_MODEL, raw) if raw else ""
+        except RuntimeError as e:
+            sys.exit(f"error: {e}")
+        print(text or "(nothing to write)")
+        if a.paste and text:
+            print("pasting into the focused window in 3 s...")
+            time.sleep(3)
+            print(dictate.paste(text))
+            time.sleep(config.CLIPBOARD_RESTORE_S + 0.2)   # let the clipboard restore run
         return
     if a.text:
         from brain import Brain
