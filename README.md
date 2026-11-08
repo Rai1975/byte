@@ -154,7 +154,7 @@ Calibrate with **F8** if you haven't yet, then:
 | 2 quick taps | Double click |
 | 3 quick taps | **Action menu** at the cursor (see below) |
 | Talk | Taps are ignored. The cursor keeps moving. |
-| Say "byte" + a command | The voice agent does it. Cursor **and** taps pause until it's completely done **plus 1 s**, or **plus 4 s for dictation** ("write this down: ...", "type ..."), so typed text lands before anything can click away from the text box. Any menu, drag, scroll or zoom is cancelled. |
+| Say "byte" + a command | The voice agent does it. Cursor **and** taps pause until it's completely done **plus 1 s** (dictation included), so typed text lands before anything can click away from the text box. Any menu, drag, scroll or zoom is cancelled. |
 
 ### Action menu (3 taps)
 
@@ -184,7 +184,7 @@ Say **"byte"** (or "hey byte"), then the command straight away. Examples: "open 
 
 **Check the integration.**
 - Talk while tapping. Taps appear as `last: SINGLE (blocked: talking)` and the `blocked` count goes up, but no click happens. The cursor still moves.
-- Click into Notepad, then say "byte, write this down: hello world". The banner shows `dictation mode`, and input stays paused until 4 s after the text is typed.
+- Click into Notepad, then say "byte, write this down: hello world". The banner shows `dictation mode`, and input stays paused until 1 s after the text is typed.
 - Say "byte, open Calculator" while looking around and tapping. The cursor stays put and taps show up as `blocked: voice agent` until Calculator opens.
 
 | Key (global) | Action |
@@ -250,7 +250,7 @@ The function keys still reach the window you're in (F5 also refreshes a browser 
 **Voice agent**
 1. `main.py` starts `voice_agent/agent.py` with its own venv in the background, or uses the one already running (for example, from the autostart task).
 2. Wake word ("byte") → record until you stop → Whisper on the GPU → common commands run instantly, the rest go to Claude, which calls tools (open apps, URLs, keys, volume...).
-3. The agent reports `busy` on `http://127.0.0.1:8765/status` from the wake word until the command is done. The app checks it 10 times a second and pauses the cursor and clicks while it's busy, plus a cooldown once it's completely done: 1 s normally, 4 s in **dictation mode** (`HOLD_AFTER_S` / `HOLD_AFTER_DICTATION_S` in [handsfree/voice_link.py](handsfree/voice_link.py)). The agent reports dictation mode as soon as the transcript starts with write/type/dictate/note, and whenever it runs its typing tool. Debug-window keys are ignored then too, in case the agent types into that window.
+3. The agent reports `busy` on `http://127.0.0.1:8765/status` from the wake word until the command is done. The app checks it 10 times a second and pauses the cursor and clicks while it's busy, plus a cooldown once it's completely done: 1 s, in **dictation mode** too (`HOLD_AFTER_S` / `HOLD_AFTER_DICTATION_S` in [handsfree/voice_link.py](handsfree/voice_link.py)). The agent reports dictation mode as soon as the transcript starts with write/type/dictate/note, and whenever it runs its typing tool. Debug-window keys are ignored then too, in case the agent types into that window.
 4. If the agent stops answering or stays busy for over 3 minutes (dictation can record for 2), the app stops pausing, so you never get stuck.
 
 ## Tips for accuracy

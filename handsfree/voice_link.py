@@ -26,9 +26,9 @@ PORT = int(os.environ.get("CONTROL_PORT", 8765))
 POLL_S = 0.1
 STALE_S = 1.0          # no answer for this long -> treat as not busy (a crashed agent never freezes you)
 MAX_BUSY_S = 180.0     # busy longer than this -> assume it's stuck (dictation can record for 2 min)
-HOLD_AFTER_S = 1.0           # keep pausing this long after a normal command finishes
-HOLD_AFTER_DICTATION_S = 4.0 # ...and this long after a dictation ("write this down") command, so the typed
-                             # text lands before any click can move focus away from the text box
+HOLD_AFTER_S = 1.0           # keep pausing this long after a command is completely done
+HOLD_AFTER_DICTATION_S = 1.0 # ...after a dictation ("write this down") command (same as normal for now;
+                             # raise it if typed text needs longer to land before clicks resume)
 
 
 class VoiceLink(threading.Thread):

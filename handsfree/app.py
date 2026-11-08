@@ -19,8 +19,8 @@ Pausing (any new input must respect these):
   App.clicks_paused  - the user is talking (talk_detect.py: Presage TALKING, lip-movement fallback)
                        OR the voice agent is busy. Jaw taps do nothing. Talking leaves the cursor live.
   App.cursor_paused  - the voice agent (voice_link.py -> voice_agent/) is handling a command, from
-                       its wake word until it's completely done + a cooldown (1 s, or 4 s after
-                       dictation, voice_link.HOLD_AFTER_S / HOLD_AFTER_DICTATION_S).
+                       its wake word until it's completely done + a 1 s cooldown
+                       (voice_link.HOLD_AFTER_S / HOLD_AFTER_DICTATION_S).
                        Cursor freezes, any drag/menu/scroll is dropped, debug-window keys are ignored.
 
 Hotkeys (global, work even when another window has focus)
