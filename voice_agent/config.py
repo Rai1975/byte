@@ -34,11 +34,14 @@ def _get(name, default, cast=str):
 
 
 # --- wake word -------------------------------------------------------------------------
-# Built-in openWakeWord models: alexa, hey_jarvis, hey_mycroft, hey_rhasspy.
-# You can also give the path to your own .onnx model. See README "Changing the wake word".
-WAKE_WORD = _get("WAKE_WORD", "hey_jarvis")
-WAKE_THRESHOLD = _get("WAKE_THRESHOLD", 0.5, float)   # 0..1. Lower = more sensitive
-WAKE_COOLDOWN_S = 1.5                                 # ignore re-triggers right after a wake
+# "sherpa" (default): open-vocabulary spotting, phrases in wake_keywords.txt (default: "byte" / "hey byte").
+# "openwakeword": pretrained models; then WAKE_WORD is hey_jarvis | alexa | hey_mycroft | hey_rhasspy | path to .onnx
+WAKE_BACKEND = _get("WAKE_BACKEND", "sherpa")
+SHERPA_THRESHOLD = _get("SHERPA_THRESHOLD", 0.1, float)   # LOWER = more sensitive (more false wakes)
+SHERPA_SCORE = _get("SHERPA_SCORE", 2.0, float)           # HIGHER = more sensitive
+WAKE_WORD = _get("WAKE_WORD", "hey_jarvis")               # openwakeword backend only
+WAKE_THRESHOLD = _get("WAKE_THRESHOLD", 0.5, float)       # openwakeword backend only, 0..1
+WAKE_COOLDOWN_S = 1.5                                     # ignore re-triggers right after a wake
 
 # --- microphone ------------------------------------------------------------------------
 # Blank = system default. Otherwise a device index or a part of its name

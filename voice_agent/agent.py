@@ -55,20 +55,6 @@ def matches(text, phrases):
     return bool(t) and bool(difflib.get_close_matches(t, phrases, n=1, cutoff=0.85))
 
 
-def load_wake_model():
-    """Create the openWakeWord model, downloading the model files first if they are missing."""
-    from openwakeword.model import Model
-    import openwakeword.utils as u
-    try:
-        return Model(wakeword_models=[config.WAKE_WORD], inference_framework="onnx")
-    except Exception as e:
-        if "NO_SUCHFILE" not in str(e) and "doesn't exist" not in str(e):
-            raise
-        log.info("wake-word models missing; downloading...")
-        u.download_models()
-        return Model(wakeword_models=[config.WAKE_WORD], inference_framework="onnx")
-
-
 class Agent:
     def __init__(self, model):
         self.model = model
@@ -134,21 +120,22 @@ class Agent:
         import audio
         from brain import Brain
         from control import start_server
+        from wake import load_wake
 
         brain = Brain(self.model)
         transcribe = audio.Transcriber()
-        oww = load_wake_model()
+        wake = load_wake()
         start_server(config.CONTROL_PORT, self.on_control, self.state)
         mic, floor = audio.Mic(), audio.NoiseFloor()
         last_wake = 0.0
         failures = 0
-        log.info("ready. wake word: %s (threshold %.2f)", config.WAKE_WORD, config.WAKE_THRESHOLD)
+        log.info("ready. wake backend: %s (%s)", config.WAKE_BACKEND, wake.name)
         while not self.quit:
             try:
                 if mic.stream is None:
                     mic.open()
                     floor.calibrate(mic)
-                    oww.reset()
+                    wake.reset()
                 frame = mic.read()
                 failures = 0
                 woke = False
@@ -157,13 +144,13 @@ class Agent:
                     woke = True
                 else:
                     floor.track(audio.rms(frame))
-                    scores = oww.predict(frame)
-                    if max(scores.values(), default=0) >= config.WAKE_THRESHOLD and time.time() - last_wake > config.WAKE_COOLDOWN_S:
+                    fired, _ = wake.process(frame)
+                    if fired and time.time() - last_wake > config.WAKE_COOLDOWN_S:
                         woke = True
                 if woke:
                     self.handle_utterance(mic, floor, transcribe, brain)
                     mic.drain()                    # drop audio from beeps / processing time
-                    oww.reset()
+                    wake.reset()
                     last_wake = time.time()
             except Exception:
                 failures += 1
@@ -176,23 +163,25 @@ class Agent:
 
 # --- diagnostics ------------------------------------------------------------------------
 def test_wake():
-    import numpy as np
     import audio
-    from openwakeword.model import Model
-    oww = load_wake_model()
+    from wake import load_wake
+    wake = load_wake()
     mic, floor = audio.Mic(), audio.NoiseFloor()
     mic.open()
     floor.calibrate(mic)
-    print(f"Say the wake word ({config.WAKE_WORD}). Threshold {config.WAKE_THRESHOLD}. Ctrl+C to stop.")
-    peak = 0.0
+    print(f"Backend: {config.WAKE_BACKEND} ({wake.name}). Say the wake word; hits are listed below. Ctrl+C to stop.")
+    hits, last = 0, ""
     try:
         while True:
             f = mic.read()
-            s = max(oww.predict(f).values(), default=0)
-            peak = max(peak * 0.98, s)
+            fired, info = wake.process(f)
             lvl = audio.rms(f)
-            hit = "  <-- WAKE" if s >= config.WAKE_THRESHOLD else ""
-            print(f"\rscore {s:4.2f} {'#' * int(s * 30):<30} peak {peak:4.2f}  mic {lvl:6.0f} (speech>{floor.threshold:.0f}){hit}   ", end="", flush=True)
+            if fired:
+                hits += 1
+                last = f"{time.strftime('%H:%M:%S')} {info}"
+                print(f"\n>>> WAKE #{hits}: {last}")
+            bar = "#" * min(40, int(lvl / max(floor.threshold, 1) * 10))
+            print(f"\rmic {lvl:6.0f} (speech>{floor.threshold:.0f}) {bar:<40} hits {hits}  {info if not fired else ''}   ", end="", flush=True)
     except KeyboardInterrupt:
         print()
     finally:

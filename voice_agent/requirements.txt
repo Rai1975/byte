@@ -8,4 +8,6 @@ pillow==13.0.0
 psutil==7.2.2
 pycaw==20260927
 pywin32==312
+sherpa-onnx-core==2.0.1
+sherpa_onnx==2.0.1
 sounddevice==0.5.6

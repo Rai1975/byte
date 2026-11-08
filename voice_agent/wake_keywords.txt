@@ -1,0 +1,8 @@
+# Wake phrases for the sherpa backend. One per line: <word pieces> @NAME
+# (several lines may share a name: they are alternative ways the model might "spell" the sound.)
+# Pieces come from models/sherpa_kws/.../tokens.txt. "byte" and "bite" sound identical, so "bite" also wakes it.
+# Verified with synthetic voices: fires on "byte" and "hey byte", not on "hey siri", "by the way", "hey buddy", etc.
+▁BY TE @BYTE
+▁BI TE @BYTE
+▁HE Y ▁BY TE @HEY_BYTE
+▁HE Y ▁BI TE @HEY_BYTE
