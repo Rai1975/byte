@@ -6,7 +6,7 @@ Say the wake word, then a command straight away. It records the instant it hears
 
 Pipeline: wake word (sherpa-onnx keyword spotting, or openWakeWord) → record until silence → faster-whisper (local, GPU) → instant local matching, else Claude tool use → actions. Only the Claude call leaves your PC.
 
-It has its own `.venv` and imports nothing from `handsfree/`. It never moves the mouse and never presses F4–F10 (those are the eye/jaw app's hotkeys). `python main.py` in the repo root starts it automatically and pauses the eye cursor and jaw clicks while it's handling a command (see "Control seam" below). You can also run it on its own.
+It has its own `.venv` and imports nothing from `byte/`. It never moves the mouse and never presses F4–F10 (those are the eye/jaw app's hotkeys). `python main.py` in the repo root starts it automatically and pauses the eye cursor and jaw clicks while it's handling a command (see "Control seam" below). You can also run it on its own.
 
 ## Setup
 
@@ -77,7 +77,7 @@ python agent.py --call-tool set_volume level=30              # one tool, no Clau
 
 `POST http://127.0.0.1:8765/pause | /resume | /trigger`, `GET /status`. POSTs need the header `X-Voice-Agent: 1`. `/trigger` is push-to-talk: it starts recording immediately with no wake word, so a jaw clench could replace the wake word (not wired up yet).
 
-`GET /status` returns `{"state": "listening"|"sleeping", "busy": bool, "phase": ""|"recording"|"transcribing"|"acting", "dictation": bool}`. `busy` is true from the wake word until the command is completely done. `dictation` turns on (and is logged as `dictation mode`) when the transcript starts with write/type/dictate/note or when `type_text` runs, and stays on until the next command starts. `handsfree/voice_link.py` polls this and pauses the eye cursor and jaw clicks while `busy`, then for 1 s more (dictation included).
+`GET /status` returns `{"state": "listening"|"sleeping", "busy": bool, "phase": ""|"recording"|"transcribing"|"acting", "dictation": bool}`. `busy` is true from the wake word until the command is completely done. `dictation` turns on (and is logged as `dictation mode`) when the transcript starts with write/type/dictate/note or when `type_text` runs, and stays on until the next command starts. `byte/voice_link.py` polls this and pauses the eye cursor and jaw clicks while `busy`, then for 1 s more (dictation included).
 
 ```python
 import urllib.request

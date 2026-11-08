@@ -17,7 +17,7 @@ import time
 import serial
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from handsfree.jaw_clicker import BAUD, find_port   # noqa: E402
+from byte.jaw_clicker import BAUD, find_port   # noqa: E402
 
 
 def main():

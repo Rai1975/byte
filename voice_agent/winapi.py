@@ -46,7 +46,7 @@ user32.SendInput.argtypes = [wt.UINT, ctypes.POINTER(INPUT), ctypes.c_int]
 user32.SendInput.restype = wt.UINT
 
 # Name -> virtual-key code. F4-F10 are listed so they can be recognised and refused
-# (see BLOCKED_KEYS); the hands-free mouse app uses them as global hotkeys.
+# (see BLOCKED_KEYS); the Byte eye/jaw app uses them as global hotkeys.
 VK = {
     "backspace": 0x08, "tab": 0x09, "enter": 0x0D, "return": 0x0D, "shift": 0x10, "ctrl": 0x11,
     "control": 0x11, "alt": 0x12, "pause": 0x13, "capslock": 0x14, "esc": 0x1B, "escape": 0x1B,
@@ -69,7 +69,7 @@ EXTENDED = {0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28, 0x2D, 0x2E, 0x5B, 0x
             0xAD, 0xAE, 0xAF, 0xB0, 0xB1, 0xB2, 0xB3}
 
 # Never sent, whatever Claude asks for.
-BLOCKED_KEYS = {"f4", "f5", "f6", "f7", "f8", "f9", "f10"}      # hands-free mouse hotkeys
+BLOCKED_KEYS = {"f4", "f5", "f6", "f7", "f8", "f9", "f10"}      # Byte eye/jaw app hotkeys
 BLOCKED_COMBOS = {frozenset(("alt", "f4"))}                # closes windows, may lose unsaved work
 
 
@@ -94,7 +94,7 @@ def press_combo(names):
         if n not in VK:
             raise ValueError(f"unknown key '{n}'")
         if n in BLOCKED_KEYS:
-            raise ValueError(f"key '{n}' is reserved for the hands-free mouse and is blocked")
+            raise ValueError(f"key '{n}' is reserved for Byte's eye/jaw app and is blocked")
     if frozenset(names) in BLOCKED_COMBOS:
         raise ValueError(f"combo '{'+'.join(names)}' is blocked (could discard unsaved work)")
     codes = [VK[n] for n in names]

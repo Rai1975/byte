@@ -1,5 +1,5 @@
 """
-Hands-free mouse: eye-tracking cursor + jaw-tap clicks + voice agent, with a live
+Byte: eye-tracking cursor + jaw-tap clicks + voice agent, with a live
 debug visualization. Run from the repo root:  python main.py
 
 Pipeline
@@ -308,8 +308,8 @@ class CursorDriver(threading.Thread):
 
 # ============================================================================ app
 class App:
-    DBG = "Hands-Free Mouse - debug"
-    CAL = "Hands-Free Mouse - calibration"
+    DBG = "Byte - debug"
+    CAL = "Byte - calibration"
 
     def __init__(self, cam_index, port=None, clicks=True, voice=True):
         self.sw, self.sh, self.width_mm = screen_info()
@@ -1075,7 +1075,7 @@ class App:
 
 
 def main():
-    ap = argparse.ArgumentParser(description="Hands-free mouse: eye cursor + jaw-tap clicks")
+    ap = argparse.ArgumentParser(description="Byte: hands-free computer control (eye cursor + jaw-tap clicks + voice agent)")
     ap.add_argument("--camera", type=int, default=0, help="camera index (default 0)")
     ap.add_argument("--port", help="Arduino COM port (default: auto-detect)")
     ap.add_argument("--no-clicks", action="store_true", help="eye cursor only, no Arduino")

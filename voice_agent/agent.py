@@ -86,7 +86,7 @@ class Agent:
 
     def status(self):
         """For GET /status. `busy` is True from the wake word until the command is done: the
-        hands-free mouse app pauses the eye cursor and jaw clicks while it is."""
+        Byte eye/jaw app pauses the eye cursor and jaw clicks while it is."""
         return {"state": self.state(), "busy": bool(self.phase), "phase": self.phase,
                 "dictation": self.dictation}
 
