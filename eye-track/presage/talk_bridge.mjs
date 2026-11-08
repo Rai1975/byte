@@ -38,23 +38,60 @@ let started = false; // send frames as soon as start() succeeds; with custom inp
 let lastTs = 0;
 
 let wasRunning = false;
+let lastErrorRetryable = false;
+let restarting = false;
+const restartTimes = [];
+const MAX_RESTARTS_PER_MIN = 5;
+
+// Retryable errors (e.g. code 8 "processing failed") put the session in kError (5). Rebuild it
+// with reset() + start() instead of giving up; give up only if it keeps failing.
+function restart() {
+  const now = Date.now();
+  while (restartTimes.length && now - restartTimes[0] > 60000) restartTimes.shift();
+  if (restartTimes.length >= MAX_RESTARTS_PER_MIN) {
+    fail({ code: -3, retryable: false, message: `Presage kept failing (${MAX_RESTARTS_PER_MIN} restarts in 1 min)` });
+    return;
+  }
+  restartTimes.push(now);
+  restarting = true;
+  started = false;
+  emit({ type: 'restart', count: restartTimes.length });
+  setTimeout(() => {
+    try {
+      sdk.reset();
+      sdk.useCustomInput();
+      sdk.start();
+      started = true;
+    } catch (e) {
+      fail({ code: e.code ?? -1, message: 'restart failed: ' + e.message, retryable: false });
+    } finally {
+      restarting = false;
+    }
+  }, 300);
+}
+
 sdk.on('processingStatus', (status) => {
   emit({ type: 'status', status });
   if (status === 3) wasRunning = true;
-  if (status === 5 && !shuttingDown) {   // terminal error (already reported via 'error')
-    process.stdout.write('', () => process.exit(1));
+  if (shuttingDown || restarting) return;
+  if (status === 5) {
+    if (lastErrorRetryable) restart();
+    else process.stdout.write('', () => process.exit(1));   // terminal (reported via 'error')
     return;
   }
   // A bad key doesn't raise 'error': the session just drops back to idle (status 1) and the
   // SDK logs "Usage verification failed. Status code: 401" to stderr.
-  if (status === 1 && started && !shuttingDown) {
+  if (status === 1 && started) {
     fail({ code: -2, retryable: false, message: wasRunning
       ? 'Presage session stopped unexpectedly'
       : 'Presage session stopped during startup (API key rejected?)' });
   }
 });
 sdk.on('validationStatus', (code, ts, hint) => emit({ type: 'validation', code, hint }));
-sdk.on('error', (code, message, retryable) => emit({ type: 'error', code, message, retryable }));
+sdk.on('error', (code, message, retryable) => {
+  lastErrorRetryable = !!retryable;
+  emit({ type: 'error', code, message, retryable });
+});
 sdk.on('metrics', (buf) => {
   const m = decodeMetrics(buf);
   const talking = m?.face?.talking;

@@ -57,7 +57,10 @@ MODEL_PATH = os.path.join(HERE, "face_landmarker.task")
 CALIB_PATH = os.path.join(HERE, "calibration.json")
 
 # ----------------------------------------------------------------------------- tuning
-CAM_W, CAM_H, CAM_FPS = 1280, 720, 30
+# 640x480 on purpose: this laptop webcam does 30 fps only at <= 640x480 (720p drops to 5 fps,
+# which makes the cursor laggy and makes Presage fail with "processing failed").
+CAM_W, CAM_H, CAM_FPS = 640, 480, 30
+LOW_FPS_WARN = 15
 SETTLE_S = 0.9          # time to let the eyes land on a calibration dot before sampling
 COLLECT_S = 1.0         # sampling time per calibration dot
 MIN_SAMPLES = 10        # minimum good frames per dot
@@ -774,6 +777,9 @@ class App:
         ctl = "ON" if self.cursor.enabled else "OFF"
         status = f"state: {self.state}   cursor control: {ctl}   fps: {self.fps:.0f}"
         put(canvas, status, (10, ty), 0.55, C_GREEN if self.cursor.enabled else C_YELLOW)
+        if 0 < self.fps < LOW_FPS_WARN:
+            put(canvas, f"LOW CAMERA FPS ({self.fps:.0f}) - lower CAM_W/CAM_H or add light",
+                (10, cam_h - 12), 0.55, C_WHITE, 2, bg=(40, 40, 200))
         line2 = []
         if self.calib_err is not None:
             line2.append(f"calib fit err {self.calib_err:.0f}px")

@@ -66,7 +66,8 @@ class PresageTalk:
         self.last_msg = 0.0
         self.last_true = float("-inf")
         self.validation = ""
-        self.messages = deque(maxlen=50)      # raw bridge messages, for debugging
+        self.restarts = 0
+        self.messages = deque(maxlen=50)     # raw bridge messages, for debugging
         self.stderr_tail = deque(maxlen=20)   # SDK log lines (auth errors show up here)
         self.proc = None
         self._slot = None
@@ -159,7 +160,13 @@ class PresageTalk:
             elif t == "validation":
                 self.validation = msg.get("hint", "")
             elif t == "error":
-                self.status = self._explain("error: " + msg.get("message", ""))
+                if msg.get("retryable"):
+                    self.status = "recovering: " + msg.get("message", "")   # bridge restarts the session
+                else:
+                    self.status = self._explain("error: " + msg.get("message", ""))
+            elif t == "restart":
+                self.restarts += 1
+                self.status = f"restarting (#{self.restarts})"
         time.sleep(0.2)  # let the stderr thread catch the SDK's last log lines
         self._dead(self._explain(self.status if self.status.startswith(("error", "auth")) else "bridge exited"))
 
