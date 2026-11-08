@@ -18,6 +18,7 @@ log = logging.getLogger("voice_agent")
 BEEPS = {
     "wake": [(1000, 70)],
     "ok": [(800, 70), (1200, 90)],
+    "confirm": [(1000, 60), (1000, 60), (1000, 60)],
     "fail": [(300, 120), (200, 220)],
     "sleep": [(900, 80), (600, 80), (400, 120)],
     "resume": [(500, 70), (800, 70), (1100, 90)],
@@ -25,6 +26,8 @@ BEEPS = {
 
 
 def beep(kind):
+    if not config.BEEPS:
+        return
     try:
         for freq, ms in BEEPS[kind]:
             winsound.Beep(freq, ms)
@@ -93,6 +96,17 @@ class Mic:
         except queue.Empty:
             raise MicStalled("no audio from the microphone")
 
+    def qsize(self):
+        return self.q.qsize()
+
+    def skip(self, n):
+        """Discard the next n frames (waits briefly for ones not captured yet)."""
+        for _ in range(max(0, n)):
+            try:
+                self.q.get(timeout=0.2)
+            except queue.Empty:
+                return
+
     def drain(self):
         n = 0
         while True:
@@ -128,20 +142,22 @@ class NoiseFloor:
         end = time.time() + seconds
         while time.time() < end:
             levels.append(rms(mic.read()))
-        self.value = max(float(np.percentile(levels, 50)), 1.0)
+        self.value = max(float(np.percentile(levels, 20)), 1.0)   # quiet part, so talking during start-up doesn't inflate it
         log.info("noise floor calibrated: %.0f (speech threshold %.0f)", self.value, self.threshold)
 
     def track(self, frame_rms):
         # Slowly follow quiet frames; ignore loud ones (speech) so talking never raises the floor.
-        if frame_rms < self.threshold:
-            self.value = 0.98 * self.value + 0.02 * max(frame_rms, 1.0)
+        if frame_rms < self.value:                       # quieter than we thought: follow quickly
+            self.value = 0.8 * self.value + 0.2 * max(frame_rms, 1.0)
+        elif frame_rms < self.threshold:                 # room got a bit louder: follow slowly
+            self.value = 0.98 * self.value + 0.02 * frame_rms
 
     @property
     def threshold(self):
         return max(self.value * config.SPEECH_FACTOR, config.MIN_SPEECH_RMS)
 
 
-def record_command(mic, floor, max_s=None, no_speech_s=None):
+def record_command(mic, floor, max_s=None, no_speech_s=None, preroll=()):
     """Record until SILENCE_S of quiet after speech. Returns float32 audio or None if no speech."""
     max_s = max_s or config.MAX_RECORD_S
     no_speech_s = no_speech_s or config.NO_SPEECH_TIMEOUT_S
@@ -149,8 +165,9 @@ def record_command(mic, floor, max_s=None, no_speech_s=None):
     frames, spoke, quiet = [], False, 0.0
     t0 = time.time()
     frame_s = config.FRAME / config.SAMPLE_RATE
+    pending = list(preroll)               # audio captured between the wake word and now
     while time.time() - t0 < max_s:
-        f = mic.read()
+        f = pending.pop(0) if pending else mic.read()
         frames.append(f)
         if rms(f) > thr:
             spoke, quiet = True, 0.0
@@ -166,13 +183,39 @@ def record_command(mic, floor, max_s=None, no_speech_s=None):
 
 
 # --- speech to text -----------------------------------------------------------------------
+def _add_nvidia_dlls():
+    """pip's nvidia-* wheels keep their DLLs under site-packages/nvidia/*/bin; make Windows find them."""
+    import os
+    import site
+    for sp in site.getsitepackages():
+        root = os.path.join(sp, "nvidia")
+        if os.path.isdir(root):
+            for sub in os.listdir(root):
+                b = os.path.join(root, sub, "bin")
+                if os.path.isdir(b):
+                    os.add_dll_directory(b)
+                    os.environ["PATH"] = b + os.pathsep + os.environ.get("PATH", "")
+
+
 class Transcriber:
+    """faster-whisper on the GPU when possible (about 5x faster), else CPU int8."""
+
     def __init__(self):
+        _add_nvidia_dlls()
         from faster_whisper import WhisperModel
-        log.info("loading whisper model %s (first run downloads it)...", config.WHISPER_MODEL)
-        self.model = WhisperModel(config.WHISPER_MODEL, device="cpu", compute_type="int8")
+        log.info("loading whisper model %s...", config.WHISPER_MODEL)
+        try:
+            self.model = WhisperModel(config.WHISPER_MODEL, device="cuda", compute_type="float16")
+            self.device = "cuda"
+            noise = (np.random.default_rng(0).standard_normal(16000) * 0.05).astype(np.float32)
+            list(self.model.transcribe(noise, language="en", beam_size=1, vad_filter=False)[0])   # warm-up: CUDA init now, not on your first command
+        except Exception as e:
+            log.warning("GPU speech-to-text unavailable (%s); using CPU", str(e)[:120])
+            self.model = WhisperModel(config.WHISPER_MODEL, device="cpu", compute_type="int8")
+            self.device = "cpu"
+        log.info("whisper ready on %s", self.device)
 
     def __call__(self, audio):
-        segs, _ = self.model.transcribe(audio, language="en", beam_size=1, vad_filter=True,
+        segs, _ = self.model.transcribe(audio, language="en", beam_size=config.WHISPER_BEAM, vad_filter=True,
                                         initial_prompt=config.WHISPER_HINT, condition_on_previous_text=False)
         return " ".join(s.text.strip() for s in segs).strip()

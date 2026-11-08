@@ -4,16 +4,17 @@ import logging
 import os
 
 import config
+import fastpath
 import tools
 
 log = logging.getLogger("voice_agent")
 
 SYSTEM = """You turn one spoken command into actions on a Windows PC, using tools. The user cannot use a keyboard or mouse. You never speak; you only act.
-- The text is speech-to-text: expect small mistakes, and ignore a leading wake word ("Jarvis").
+- The text is speech-to-text: expect mistakes ("choose my brightness" = "turn my brightness"). If exactly one harmless command is a plausible reading, do it. Never guess at numbers or at closing apps; if unsure, answer: unclear. Ignore a leading wake word.
 - Prefer open_url / search_web over typing into the browser. They open a NEW Chrome tab and start Chrome if needed. "Open Chrome and search X" = just search_web(X).
-- Use launch_app for apps, browser_tab_action for tab commands, set_volume/set_mute for sound.
-- Do exactly what was asked, in order, nothing extra. Never invent a command.
-- If a command is unclear or impossible with your tools (e.g. shutdown, delete, close a window), call no tools and reply with the single word: unclear.
+- Use launch_app / close_app for apps (call close_app straight away, no confirmation), browser_tab_action for tab commands, set_volume/set_mute for sound, set_brightness for the screen.
+- Do exactly what was asked, in order, nothing extra. Make ALL needed tool calls together in your first reply, in order (there is no second turn). Never invent a command.
+- If a command is unclear or impossible with your tools (e.g. shutdown, restart, delete files), call no tools and reply with the single word: unclear.
 - After the tools succeed, reply with at most three words."""
 
 
@@ -28,8 +29,16 @@ class Brain:
         self.model = model
         self.specs = tools.tool_specs()
 
-    def run(self, command):
-        """Returns (success, summary). Executes tool calls as Claude requests them."""
+    def run(self, command, confirmer=None):
+        """Returns (success, summary). Common commands run instantly via fastpath; the rest go to Claude."""
+        fast = fastpath.match(command)
+        if fast:
+            ok_all = True
+            for name, args in fast:
+                ok, msg = tools.run_tool(name, args, confirmer)
+                log.info("fast %s(%s) -> %s %s", name, args, "OK" if ok else "FAIL", msg)
+                ok_all = ok_all and ok
+            return ok_all, "fast path"
         messages = [{"role": "user", "content": command}]
         ran = 0
         failed = False
@@ -46,11 +55,13 @@ class Brain:
             messages.append({"role": "assistant", "content": resp.content})
             results = []
             for c in calls:
-                ok, msg = tools.run_tool(c.name, c.input)
+                ok, msg = tools.run_tool(c.name, c.input, confirmer)
                 ran += 1
                 log.info("tool %s(%s) -> %s %s", c.name, c.input, "OK" if ok else "FAIL", msg)
                 if not ok:
                     failed = True
                 results.append({"type": "tool_result", "tool_use_id": c.id, "content": msg, "is_error": not ok})
             messages.append({"role": "user", "content": results})
-        return False, "too many steps"
+            if not failed:
+                return True, "done"      # nothing is spoken back, so skip the extra Claude call that would just say "Done"
+            return False, "tool failed"

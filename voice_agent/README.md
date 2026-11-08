@@ -1,15 +1,10 @@
 # Voice agent
 
-Say the wake word, then a command. It runs the command and never talks back. Short beeps tell you what happened:
+Say the wake word, then a command straight away. It records the instant it hears the wake word, runs the command, and makes no sound at all (set `BEEPS=1` in `.env` if you ever want the old beeps: sleep/exit/resume still matter without them, so check `logs/voice_agent.log`).
 
-| Beep | Meaning |
-|------|---------|
-| one short high | wake word heard, speak now |
-| rising two-note | command worked (also: resumed) |
-| low falling | failed, not understood, or no speech heard |
-| falling three-note | going to sleep / exiting |
+**Speed:** speech-to-text runs on the NVIDIA GPU (about 0.2 s; falls back to CPU if CUDA is unavailable). Common commands (mute, volume/brightness N, tab actions, screenshot, lock, minimize, open/close an app, media keys) are matched locally in `fastpath.py` and run without calling Claude. Everything else goes to Claude (about 1 s extra). `logs/voice_agent.log` has a `timing:` line for every command.
 
-Pipeline: wake word (sherpa-onnx keyword spotting, or openWakeWord) → record until silence → faster-whisper (local) → Claude tool use → actions. Only the Claude call leaves your PC.
+Pipeline: wake word (sherpa-onnx keyword spotting, or openWakeWord) → record until silence → faster-whisper (local, GPU) → instant local matching, else Claude tool use → actions. Only the Claude call leaves your PC.
 
 It is separate from the eye/jaw app: its own `.venv`, nothing imported from `handsfree/`, no mouse input, never presses F5–F10 (those are that app's hotkeys).
 
@@ -31,7 +26,12 @@ Default wake word: **"byte"** (or "hey byte"). "Bite" sounds identical, so it wa
 
 - **"stop listening"** / **"sleep"**: pauses. While asleep, say the wake word then **"resume"** (also "wake up", "start listening").
 - **"exit voice control"**: quits. It stays off until the next login or manual start.
+- **Closing apps** ("close Calculator"): closes immediately, no confirmation. It closes windows politely (like clicking X), so an app with unsaved work still shows its own "save changes?" prompt, and the window stays open until you answer it. It never kills processes. "Close Chrome" closes all Chrome windows.
 - No shutdown/restart/delete tools exist, and `alt+f4` and F5–F10 are refused. Claude answers "unclear" for them.
+
+## Apps and brightness
+
+Allowlisted apps (`APPS` in `tools.py`): Chrome, Edge, Firefox, Notepad, File Explorer, Calculator, Paint, Snipping Tool, Task Manager, Settings, Outlook (new), Outlook classic, Word, Excel, PowerPoint, OneNote, Teams, Zoom, Spotify, Discord, WhatsApp, Obsidian. "Outlook" is the new Outlook; say "classic Outlook" for the old one. To add an app, add a line to `APPS` with its process name(s) and its Start-menu name. Brightness ("brightness to 60", "brighter") works on the built-in laptop display only; external monitors are not supported.
 
 ## Autostart at login (no console window)
 
@@ -52,7 +52,7 @@ Task Scheduler runs `run_hidden.pyw` (pythonw), which restarts the agent after a
 | `SHERPA_SCORE` | 2.0 | higher = more sensitive |
 | `WHISPER_MODEL` | `base.en` | `small.en` is more accurate, slower |
 | `CLAUDE_MODEL` | `claude-haiku-5-5` | set `claude-sonnet-5-5` for harder commands |
-| `SILENCE_S` | 1.0 | quiet time that ends a command |
+| `SILENCE_S` | 0.7 | quiet time that ends a command |
 | `CONTROL_PORT` | 8765 | |
 
 ## Changing the wake word

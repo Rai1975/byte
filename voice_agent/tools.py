@@ -47,19 +47,41 @@ def chrome_path():
     return _app_path("chrome.exe", r"Google\Chrome\Application\chrome.exe")
 
 
+# exes: process names owning the app's windows. start: Start-menu name, so launching works for
+# store apps and desktop apps alike without hunting for install paths. launch: explicit command.
 APPS = {
-    "chrome": {"exe": "chrome.exe", "launch": lambda: [chrome_path()]},
-    "edge": {"exe": "msedge.exe", "launch": lambda: ["msedge.exe"]},
-    "notepad": {"exe": "notepad.exe", "launch": lambda: ["notepad.exe"]},
-    "file explorer": {"exe": "explorer.exe", "launch": lambda: ["explorer.exe"], "always_new": True},
-    "calculator": {"exe": "calculatorapp.exe", "launch": lambda: ["calc.exe"]},
-    "paint": {"exe": "mspaint.exe", "launch": lambda: ["mspaint.exe"]},
-    "task manager": {"exe": "taskmgr.exe", "launch": lambda: ["taskmgr.exe"]},
-    "settings": {"exe": "systemsettings.exe", "uri": "ms-settings:"},
+    "chrome": {"exes": ("chrome.exe",), "launch": lambda: [chrome_path()]},
+    "edge": {"exes": ("msedge.exe",), "launch": lambda: ["msedge.exe"]},
+    "firefox": {"exes": ("firefox.exe",), "start": "Firefox"},
+    "notepad": {"exes": ("notepad.exe",), "launch": lambda: ["notepad.exe"]},
+    "file explorer": {"exes": ("explorer.exe",), "cls": "CabinetWClass", "launch": lambda: ["explorer.exe"], "always_new": True},
+    "calculator": {"exes": ("calculatorapp.exe", "calculator.exe"), "start": "Calculator"},
+    "paint": {"exes": ("mspaint.exe", "paintapp.exe"), "start": "Paint"},
+    "snipping tool": {"exes": ("snippingtool.exe",), "start": "Snipping Tool"},
+    "task manager": {"exes": ("taskmgr.exe",), "launch": lambda: ["taskmgr.exe"]},
+    "settings": {"exes": ("systemsettings.exe",), "uri": "ms-settings:"},
+    "outlook": {"exes": ("olk.exe",), "start": "Outlook"},                       # the new Outlook
+    "outlook classic": {"exes": ("outlook.exe",), "start": "Outlook (classic)"},
+    "word": {"exes": ("winword.exe",), "start": "Word"},
+    "excel": {"exes": ("excel.exe",), "start": "Excel"},
+    "powerpoint": {"exes": ("powerpnt.exe",), "start": "PowerPoint"},
+    "onenote": {"exes": ("onenote.exe",), "start": "OneNote"},
+    "teams": {"exes": ("ms-teams.exe", "teams.exe"), "start": "Microsoft Teams"},
+    "zoom": {"exes": ("zoom.exe",), "start": "Zoom Workplace"},
+    "spotify": {"exes": ("spotify.exe",), "start": "Spotify"},
+    "discord": {"exes": ("discord.exe",), "start": "Discord"},
+    "whatsapp": {"exes": ("whatsapp.exe", "whatsapp.root.exe"), "start": "WhatsApp"},
+    "obsidian": {"exes": ("obsidian.exe",), "start": "Obsidian"},
 }
 ALIASES = {"google chrome": "chrome", "browser": "chrome", "explorer": "file explorer",
            "files": "file explorer", "windows explorer": "file explorer", "microsoft edge": "edge",
-           "calc": "calculator", "windows settings": "settings", "task mgr": "task manager"}
+           "calc": "calculator", "windows settings": "settings", "task mgr": "task manager",
+           "new outlook": "outlook", "microsoft outlook": "outlook", "mail": "outlook", "email": "outlook",
+           "classic outlook": "outlook classic", "outlook (classic)": "outlook classic",
+           "microsoft word": "word", "ms word": "word", "microsoft excel": "excel", "ms excel": "excel",
+           "power point": "powerpoint", "microsoft powerpoint": "powerpoint", "ms powerpoint": "powerpoint",
+           "microsoft onenote": "onenote", "microsoft teams": "teams", "ms teams": "teams",
+           "zoom workplace": "zoom", "snipping": "snipping tool", "snip": "snipping tool"}
 
 
 def _resolve_app(name):
@@ -76,31 +98,65 @@ def _spawn(argv):
     subprocess.Popen(argv, close_fds=True, creationflags=0x00000008 | 0x00000200)  # DETACHED | NEW_GROUP
 
 
+def _start_menu_launch(display_name):
+    """Launch by Start-menu name (store apps, Office, Discord, ...) via the AppsFolder shell namespace."""
+    import win32com.client
+    items = win32com.client.Dispatch("Shell.Application").NameSpace("shell:AppsFolder").Items()
+    for i in range(items.Count):
+        it = items.Item(i)
+        if it.Name.lower() == display_name.lower():
+            if os.path.exists(it.Path):
+                return _spawn([it.Path])
+            return os.startfile("shell:AppsFolder\\" + it.Path)
+    raise RuntimeError(f"'{display_name}' is not installed (not in the Start menu)")
+
+
+def _windows(app):
+    return winapi.find_windows(app["exes"], app.get("cls"))
+
+
 def _focus_app(key):
-    wins = winapi.find_windows(APPS[key]["exe"])
-    if not wins:
-        return False
-    return winapi.focus_window(wins[0])
+    wins = _windows(APPS[key])
+    return bool(wins) and winapi.focus_window(wins[0])
 
 
 # --- tools --------------------------------------------------------------------------------
 
 def launch_app(name):
     key, app = _resolve_app(name)
-    if not app.get("always_new") and winapi.find_windows(app["exe"]):
+    if not app.get("always_new") and _windows(app):
         if _focus_app(key):
             return f"{key} was already open; focused it"
         raise RuntimeError(f"{key} is open but Windows would not let me focus it")
     if "uri" in app:
         os.startfile(app["uri"])
-    else:
+    elif "launch" in app:
         _spawn(app["launch"]())
+    else:
+        _start_menu_launch(app["start"])
     return f"launched {key}"
 
 
 def focus_app(name):
     key, _ = _resolve_app(name)
     return f"focused {key}" if _focus_app(key) else f"{key} has no open window"
+
+
+def close_app(name):
+    """Politely close every window of an allowed app (WM_CLOSE, like clicking the X: the app itself
+    asks to save unsaved work). Never kills processes."""
+    import win32con, win32gui
+    key, app = _resolve_app(name)
+    wins = _windows(app)
+    if not wins:
+        return f"{key} is not open"
+    for h in wins:
+        win32gui.PostMessage(h, win32con.WM_CLOSE, 0, 0)
+    time.sleep(1.5)
+    left = [h for h in wins if win32gui.IsWindow(h) and win32gui.IsWindowVisible(h)]
+    if left:
+        return f"asked {key} to close; {len(left)} window(s) still open (probably asking whether to save)"
+    return f"closed {key} ({len(wins)} window(s))"
 
 
 def _normalize_url(url):
@@ -147,7 +203,7 @@ def _ensure_focus(app):
     if not app:
         return
     key, _ = _resolve_app(app)
-    if winapi.foreground_exe() != APPS[key]["exe"] and not _focus_app(key):
+    if winapi.foreground_exe() not in APPS[key]["exes"] and not _focus_app(key):
         raise RuntimeError(f"{key} has no window to focus")
 
 
@@ -200,6 +256,33 @@ def set_mute(mute=True):
     vol = _volume()
     vol.SetMute(1 if mute else 0, None)
     return "muted" if mute else "unmuted"
+
+
+def _wmi():
+    import win32com.client
+    return win32com.client.GetObject(r"winmgmts:root\wmi")
+
+
+def set_brightness(level=None, change=None):
+    """Built-in laptop display only (WMI). External monitors need DDC/CI and are not supported.
+    Never goes below 10%: a near-black screen is unusable for someone who cannot use a keyboard."""
+    if level is None and change is None:
+        raise ValueError("give level (0-100) or change (+/- percent)")
+    w = _wmi()
+    cur = list(w.ExecQuery("SELECT * FROM WmiMonitorBrightness"))
+    methods = list(w.ExecQuery("SELECT * FROM WmiMonitorBrightnessMethods"))
+    if not cur or not methods:
+        raise RuntimeError("no built-in display brightness control found (external monitors are not supported)")
+    now = int(cur[0].CurrentBrightness)
+    target = int(round(max(10.0, min(100.0, float(level if level is not None else now + change)))))
+    for m in methods:        # ExecMethod with typed in-params: a direct m.WmiSetBrightness(...) call is rejected
+        ip = m.Methods_("WmiSetBrightness").InParameters.SpawnInstance_()
+        ip.Timeout = 1
+        ip.Brightness = target
+        w.ExecMethod(m.Path_.Path, "WmiSetBrightness", ip)
+    time.sleep(0.3)
+    after = int(list(w.ExecQuery("SELECT * FROM WmiMonitorBrightness"))[0].CurrentBrightness)
+    return f"brightness {now}% -> {after}%"
 
 
 def lock_screen():
@@ -272,6 +355,7 @@ _APP_ENUM = {"type": "string", "description": "One of: " + ", ".join(sorted(APPS
 _FOCUS = {"type": "string", "description": "Optional app to focus before sending input, e.g. 'notepad'"}
 
 REGISTRY = {
+    "close_app": (close_app, _schema("Close all windows of an allowed app. Runs immediately, no confirmation.", {"name": _APP_ENUM}, ["name"])),
     "launch_app": (launch_app, _schema("Open an allowed app (focuses it if already open).", {"name": _APP_ENUM}, ["name"])),
     "focus_app": (focus_app, _schema("Bring an open app window to the front.", {"name": _APP_ENUM}, ["name"])),
     "open_url": (open_url, _schema("Open a web address in a NEW Chrome tab.", {"url": {"type": "string"}}, ["url"])),
@@ -280,6 +364,7 @@ REGISTRY = {
     "type_text": (type_text, _schema("Type text into the focused (or given) app.", {"text": {"type": "string"}, "focus": _FOCUS}, ["text"])),
     "press_keys": (press_keys, _schema("Press a key or combo, e.g. 'ctrl+l', 'enter', 'win+d'. F5-F10 and alt+f4 are refused.", {"keys": {"type": "string"}, "focus": _FOCUS}, ["keys"])),
     "set_volume": (set_volume, _schema("Set system volume to a level (0-100), or change it relatively.", {"level": {"type": "number", "minimum": 0, "maximum": 100}, "change": {"type": "number", "description": "percent to add (negative to lower)"}})),
+    "set_brightness": (set_brightness, _schema("Set screen brightness (0-100), or change it relatively.", {"level": {"type": "number", "minimum": 0, "maximum": 100}, "change": {"type": "number", "description": "percent to add (negative to lower)"}})),
     "set_mute": (set_mute, _schema("Mute or unmute system audio.", {"mute": {"type": "boolean"}}, ["mute"])),
     "lock_screen": (lock_screen, _schema("Lock the computer.")),
     "screenshot": (screenshot, _schema("Save a screenshot of all screens to the Pictures/voice-agent folder.")),
@@ -294,11 +379,20 @@ def tool_specs():
     return [{"name": n, **spec} for n, (_, spec) in REGISTRY.items()]
 
 
-def run_tool(name, args):
-    """Run one tool. Never raises: returns (ok, message)."""
+CONFIRM_REQUIRED = set()     # tools listed here need a spoken "confirm" within 5 s (none right now)
+
+
+def run_tool(name, args, confirmer=None):
+    """Run one tool. Never raises: returns (ok, message).
+    `confirmer(description) -> bool` asks the user to say "confirm" (see agent.py)."""
     if name not in REGISTRY:
         return False, f"unknown tool '{name}'"
     try:
+        if name in CONFIRM_REQUIRED:
+            if confirmer is None:
+                return False, "this action needs spoken confirmation, which is unavailable here"
+            if not confirmer(f"{name} {args}"):
+                return False, "cancelled: the user did not confirm. Do not retry."
         return True, REGISTRY[name][0](**(args or {}))
     except Exception as e:                                   # tool errors must never kill the loop
         return False, f"{type(e).__name__}: {e}"

@@ -129,13 +129,38 @@ def _exe_of(hwnd):
         return ""
 
 
-def find_windows(exe_name):
-    """Visible, titled top-level windows of a process (e.g. 'chrome.exe'), topmost first."""
+def _hosted_exe(frame_hwnd):
+    """Store apps (Calculator, Photos, ...) show up as ApplicationFrameHost windows; the real app
+    owns a child window. Return that child's process name."""
+    found = []
+
+    def cb(child, _):
+        e = _exe_of(child)
+        if e and e != "applicationframehost.exe":
+            found.append(e)
+            return False
+        return True
+
+    try:
+        win32gui.EnumChildWindows(frame_hwnd, cb, None)
+    except Exception:
+        pass
+    return found[0] if found else ""
+
+
+def find_windows(exes, cls=None):
+    """Visible, titled top-level windows of the given process name(s), topmost first.
+    `cls` optionally restricts to one window class (e.g. 'CabinetWClass' = File Explorer windows,
+    which keeps the desktop/taskbar, owned by the same explorer.exe, out of the list)."""
+    names = {exes.lower()} if isinstance(exes, str) else {e.lower() for e in exes}
     out = []
 
     def cb(hwnd, _):
-        if win32gui.IsWindowVisible(hwnd) and win32gui.GetWindowText(hwnd) and _exe_of(hwnd) == exe_name.lower():
-            out.append(hwnd)
+        if (win32gui.IsWindowVisible(hwnd) and win32gui.GetWindowText(hwnd)
+                and (cls is None or win32gui.GetClassName(hwnd) == cls)):
+            exe = _exe_of(hwnd)
+            if exe in names or (exe == "applicationframehost.exe" and _hosted_exe(hwnd) in names):
+                out.append(hwnd)
         return True
 
     win32gui.EnumWindows(cb, None)

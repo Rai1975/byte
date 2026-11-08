@@ -51,15 +51,17 @@ SAMPLE_RATE = 16000
 FRAME = 1280                                          # 80 ms, what openWakeWord expects
 
 # --- recording / silence ---------------------------------------------------------------
-SILENCE_S = _get("SILENCE_S", 1.0, float)             # end of command after this much quiet
+SILENCE_S = _get("SILENCE_S", 0.5, float)             # end of command after this much quiet
 MAX_RECORD_S = _get("MAX_RECORD_S", 15.0, float)
 NO_SPEECH_TIMEOUT_S = _get("NO_SPEECH_TIMEOUT_S", 5.0, float)
 SPEECH_FACTOR = _get("SPEECH_FACTOR", 2.5, float)     # speech = louder than noise floor * this
 MIN_SPEECH_RMS = _get("MIN_SPEECH_RMS", 250, float)   # absolute floor for the threshold (int16 units)
 
 # --- speech to text (local) ------------------------------------------------------------
-WHISPER_MODEL = _get("WHISPER_MODEL", "base.en")      # tiny.en, base.en, small.en (slower, better)
-WHISPER_HINT = "Chrome, YouTube, Google, Notepad, File Explorer, Settings, new tab, screenshot, volume."
+WHISPER_MODEL = _get("WHISPER_MODEL", "small.en")     # tiny.en < base.en < small.en < medium.en (slower, better)
+WHISPER_BEAM = _get("WHISPER_BEAM", 5, int)
+WHISPER_HINT = ("Open Chrome. Close Outlook. Turn the brightness up to 80 percent. Volume to 30. Mute. "
+                "Go to youtube.com in a new tab. Search for the weather. Next tab. Take a screenshot. Open Notepad.")
 
 # --- Claude ----------------------------------------------------------------------------
 CLAUDE_MODEL = _get("CLAUDE_MODEL", "claude-haiku-5-5")
@@ -69,6 +71,9 @@ MAX_TOOL_ROUNDS = 6
 
 # --- control seam (localhost) ----------------------------------------------------------
 CONTROL_PORT = _get("CONTROL_PORT", 8765, int)
+
+# --- feedback -------------------------------------------------------------------------
+BEEPS = _get("BEEPS", "0", str).lower() in ("1", "true", "yes", "on")   # off: it just listens and acts
 
 # --- misc ------------------------------------------------------------------------------
 LOG_DIR = HERE / "logs"
