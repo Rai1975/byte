@@ -63,6 +63,7 @@ class Agent:
         self.quit = False
         self.trigger = threading.Event()
         self.pending = []                         # commands from the control endpoint
+        self.phase = ""                           # "" idle, else recording | transcribing | acting
 
     # --- control seam -------------------------------------------------------------------
     def on_control(self, cmd):
@@ -77,14 +78,27 @@ class Agent:
     def state(self):
         return "sleeping" if self.sleeping else "listening"
 
+    def status(self):
+        """For GET /status. `busy` is True from the wake word until the command is done: the
+        hands-free mouse app pauses the eye cursor and jaw clicks while it is."""
+        return {"state": self.state(), "busy": bool(self.phase), "phase": self.phase}
+
     # --- one spoken interaction ---------------------------------------------------------
     def handle_utterance(self, mic, floor, transcribe, brain):
         """Called the instant the wake word is heard. No sound is played first: the mic queue
         already holds whatever was said right after the wake word, and recording starts from it."""
+        self.phase = "recording"
+        try:
+            self._handle_utterance(mic, floor, transcribe, brain)
+        finally:
+            self.phase = ""
+
+    def _handle_utterance(self, mic, floor, transcribe, brain):
         from audio import beep, record_command
         t0 = time.time()
         audio = record_command(mic, floor)
         t1 = time.time()
+        self.phase = "transcribing"
         if audio is None:
             log.info("no speech after wake")
             beep("fail")
@@ -111,6 +125,7 @@ class Agent:
         elif matches(text, RESUME_PHRASES):
             beep("resume")
         else:
+            self.phase = "acting"
             try:
                 ok, summary = brain.run(text, lambda what: self.ask_confirm(mic, floor, transcribe, what))
             except Exception:
@@ -143,7 +158,7 @@ class Agent:
         brain = Brain(self.model)
         transcribe = audio.Transcriber()
         wake = load_wake()
-        start_server(config.CONTROL_PORT, self.on_control, self.state)
+        start_server(config.CONTROL_PORT, self.on_control, self.status)
         mic, floor = audio.Mic(), audio.NoiseFloor()
         last_wake = 0.0
         failures = 0

@@ -5,21 +5,24 @@ Control your computer's mouse without your hands:
 - **Move the cursor with your eyes.** A webcam tracks where you look.
 - **Click by tapping your teeth.** A loudness sensor on your jaw, read by an Arduino, picks up the taps. One tap clicks, two double-click, and three open an action menu with right click, drag/select, scroll and zoom.
 - **The cursor snaps onto nearby buttons and links**, so small targets are easier to hit.
-- **Talking pauses everything.** While you speak, the cursor freezes and taps don't click, so you can talk or dictate without the mouse going off on its own. Presage SmartSpectra detects the talking, and a lip-movement detector takes over if Presage isn't available.
+- **Talking never gets in the way.** You can talk normally while pointing and clicking. Talking is detected (Presage SmartSpectra, with a lip-movement fallback) and shown in the debug window, but it doesn't block anything on its own.
+- **Voice agent.** Say **"byte"** and then a command ("open Chrome", "search for the weather", "volume to 30", "next tab"). While the agent is working on a command, **the cursor and the clicks are both paused**, so nothing moves under it.
 
-Everything runs as one program: `python main.py`.
+Everything runs as one program: `python main.py`. It starts the voice agent in the background for you.
 
 ## Repo layout
 
 ```text
-main.py                    start the app (eye cursor + jaw clicks + talk pause)
+main.py                    start the app (eye cursor + jaw clicks + voice agent)
 handsfree/
   app.py                   eye tracking, cursor driver, calibration, debug window; wires it all up
   jaw_clicker.py           jaw-tap detector (reads the Arduino over USB serial)
   actions.py               what taps do: click, double click, action menu, drag, scroll, zoom
   snap.py                  snapping to nearby buttons/links (Windows UI Automation)
   overlay.py               transparent on-screen layer: menu, snap highlight, zoom view
-  talk_detect.py           talking detection (Presage + lip-movement fallback)
+  talk_detect.py           talking detection (Presage + lip-movement fallback), shown in the debug window
+  voice_link.py            starts the voice agent and pauses input while it's busy
+voice_agent/               "byte" voice commands: wake word, local Whisper, Claude tool use (own venv)
 presage/talk_bridge.mjs    Node bridge to the Presage SDK (the SDK is Node-only)
 arduino/loudness/          Arduino sketch that streams the loudness sensor
 tools/
@@ -57,6 +60,17 @@ Without a key, the app falls back to the lip-movement detector automatically.
 3. Close the Serial Monitor and App Lab afterwards. Only one program can use the port at a time.
 
 The app finds the Arduino's COM port automatically. Pass `--port COMx` to choose one yourself.
+
+**Voice agent (optional, recommended).** It needs its own Python 3.12 venv (GPU speech-to-text), set up once:
+
+```powershell
+cd voice_agent
+py -3.12 -m venv .venv
+.\.venv\Scripts\python -m pip install -r requirements.txt
+cd ..
+```
+
+Add `ANTHROPIC_API_KEY=...` to the same repo-root `.env`. `main.py` starts the agent automatically when `voice_agent/.venv` exists, and stops it when you quit. Without the venv, everything else still works. Details: [voice_agent/README.md](voice_agent/README.md).
 
 Every command below assumes `conda activate makeuc-eye` and the repo root as the working directory.
 
@@ -112,12 +126,18 @@ Tuning lives at the top of [handsfree/jaw_clicker.py](handsfree/jaw_clicker.py):
 
 Rerun after each change. The main app uses the same settings.
 
-### d) Pause while talking
+### d) Talk detection
 
-Run `python main.py --no-clicks` and talk.
-- The camera view should get a red border and a **TALKING - INPUT PAUSED** banner.
-- The cursor should freeze, then resume about 0.7 s after you stop.
+Run `python main.py --no-voice` and talk while tapping.
+- A small grey `talking` label appears on the camera view.
+- **Clicks and the cursor keep working.** Talking on its own blocks nothing.
 - The `talk detect [...]` line shows which detector is active (`presage` or `local`) and the Presage status, for example `running`, `no API key` or `auth failed`.
+
+### e) Voice agent
+
+1. On its own first: `voice_agent\.venv\Scripts\python voice_agent\agent.py --text "volume to 30"` should change the volume. Then `voice_agent\.venv\Scripts\python voice_agent\agent.py --test-wake` and say "byte" 10 times: you want about 10 hits, and none while you chat normally.
+2. Then inside the app: `python main.py`. The `voice agent:` line goes from `loading...` to `listening` (about 10–20 s the first time).
+3. Say **"byte, open Notepad"**. The camera view gets a magenta **VOICE AGENT - ALL INPUT PAUSED** banner, the cursor freezes and taps are blocked, and both come back as soon as Notepad opens.
 
 ## 3. Run everything
 
@@ -133,7 +153,8 @@ Calibrate with **F8** if you haven't yet, then:
 | 1 tap | Left click |
 | 2 quick taps | Double click |
 | 3 quick taps | **Action menu** at the cursor (see below) |
-| Talk | Cursor freezes, taps are ignored, and any drag is dropped |
+| Talk | Nothing changes: the cursor and taps keep working. |
+| Say "byte" + a command | The voice agent does it. Cursor **and** taps pause until it's done, and any menu, drag, scroll or zoom is cancelled. |
 
 ### Action menu (3 taps)
 
@@ -157,13 +178,19 @@ A ring of four big buttons appears around the cursor. **Look at one and tap once
   - It's off while dragging, scrolling, zooming or in the menu, so text selection is never affected.
   - Tune it with `SNAP_IN_PX`, `SNAP_OUT_PX` and `SNAP_DWELL_S` in [handsfree/snap.py](handsfree/snap.py).
 
-**Check the integration.** Talk while tapping. Taps then appear in the debug window as `last: SINGLE (blocked: talking)` and the `blocked` count goes up, but no click happens.
+### Voice commands
+
+Say **"byte"** (or "hey byte"), then the command straight away. Examples: "open Chrome", "close Notepad", "go to youtube.com", "search for MakeUC", "next tab", "close tab", "volume to 30", "mute", "brightness 60", "take a screenshot", "minimize everything". "Byte, stop listening" puts it to sleep and "byte, resume" wakes it. Full list: [voice_agent/README.md](voice_agent/README.md).
+
+**Check the integration.**
+- Talk while tapping. The taps still click.
+- Say "byte, open Calculator" while looking around and tapping. The cursor stays put and taps show up as `blocked: voice agent` until Calculator opens.
 
 | Key (global) | Action |
 |-----|--------|
 | F4  | Snap to buttons on/off |
 | F5  | Jaw-tap clicks on/off |
-| F6  | Pause-while-talking on/off |
+| F6  | Talk detection on/off (display only) |
 | F7  | Cursor control on/off |
 | F8  | Calibrate |
 | F9  | Accuracy check |
@@ -171,7 +198,7 @@ A ring of four big buttons appears around the cursor. **Look at one and tap once
 | `[` / `]` | Less / more cursor smoothing (debug window focused) |
 | `-` / `=` | Less / more responsiveness during fast moves |
 
-Options: `--no-clicks` (no Arduino), `--port COM10` (pick the Arduino port), `--camera 1` (another webcam).
+Options: `--no-clicks` (no Arduino), `--no-voice` (don't start the voice agent), `--port COM10` (pick the Arduino port), `--camera 1` (another webcam).
 
 The function keys still reach the window you're in (F5 also refreshes a browser page, for example). Click on the debug window first if that matters.
 
@@ -181,7 +208,7 @@ The function keys still reach the window you're in (F5 also refreshes a browser 
   - Eye outlines, irises and a head-direction arrow.
   - `BLINK` means the cursor is holding still.
   - A green `TAP: ...` banner shows what each gesture did (`CLICK`, `MENU`, `RIGHT CLICK`, `DROP`...).
-  - A red border means talking.
+  - A grey `talking` label means talking was detected (nothing is paused). A magenta border means the voice agent is busy (cursor and clicks paused).
 - **Eyes (zoomed) / iris offset:** the raw signal that drives the cursor.
 - **Screen:** a minimap of your monitor. Red is the raw gaze estimate, green is smoothed, and the white cross is the actual cursor.
 - **Status lines:**
@@ -189,7 +216,8 @@ The function keys still reach the window you're in (F5 also refreshes a browser 
   - Calibration error.
   - Smoothing.
   - The talk detector.
-  - A **clicks** line: port, readings/s, on/off, total taps, taps blocked by talking, and the last gesture, with a mini graph of the tap signal (the red line is the threshold).
+  - A **clicks** line: port, readings/s, on/off, total taps, taps blocked by the voice agent, and the last gesture, with a mini graph of the tap signal (the red line is the threshold).
+  - A **voice agent** line: `loading...`, `listening`, `sleeping`, or `BUSY (recording / transcribing / acting)`, and how many commands it has handled.
 
 ## How it works
 
@@ -212,11 +240,17 @@ The function keys still reach the window you're in (F5 also refreshes a browser 
 2. Clickable elements become candidates. Huge elements, like full-width list rows, are skipped.
 3. The cursor locks onto the nearest candidate after a short dwell, using the in/out zones described above.
 
-**Talk pause**
+**Talk detection**
 1. Webcam frames are piped to a small Node process that runs the Presage SmartSpectra `TALKING` metric.
 2. The bridge restarts Presage automatically if it hits a recoverable error.
 3. If Presage isn't available, a detector that counts lip open/close cycles is used instead.
-4. Either way, `App.inputs_paused` gates the cursor and the clicks.
+4. It's shown in the debug window only. Clicks are blocked only while the voice agent is busy (`App.clicks_paused`).
+
+**Voice agent**
+1. `main.py` starts `voice_agent/agent.py` with its own venv in the background, or uses the one already running (for example, from the autostart task).
+2. Wake word ("byte") → record until you stop → Whisper on the GPU → common commands run instantly, the rest go to Claude, which calls tools (open apps, URLs, keys, volume...).
+3. The agent reports `busy` on `http://127.0.0.1:8765/status` from the wake word until the command is done. The app checks it 10 times a second, and `App.cursor_paused` freezes the cursor while it's busy.
+4. If the agent stops answering or stays busy for over 40 s, the app stops pausing, so you never get stuck.
 
 ## Tips for accuracy
 

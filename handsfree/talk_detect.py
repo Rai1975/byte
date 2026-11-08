@@ -1,5 +1,6 @@
 """
-Talking detection, used to pause all mouse input while the user speaks.
+Talking detection. Display-only in the app: talking alone doesn't block the cursor or clicks
+(only a BUSY voice agent does). It still keeps calibration from sampling while you talk.
 
 Two detectors:
   PresageTalk  Presage SmartSpectra TALKING metric. The SDK is Node-only, so a small Node process
@@ -30,7 +31,7 @@ BRIDGE = os.path.join(BRIDGE_DIR, "talk_bridge.mjs")
 
 # ----------------------------------------------------------------------------- tuning
 TALK_MODE = "auto"        # "auto": Presage if live, else local | "both": either one | "local" | "presage"
-HOLD_S = 0.7              # keep input paused this long after talking stops (gaps between words)
+HOLD_S = 0.7              # report talking this long after it stops (gaps between words)
 PRESAGE_SEND_W = 640      # frames are downscaled to this width before going to Presage
 PRESAGE_STALE_S = 3.0     # no talking update for this long -> treat Presage as not live
 LOCAL_WINDOW_S = 0.7      # look-back window for lip movement

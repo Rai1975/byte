@@ -1,5 +1,5 @@
 """
-Hands-free mouse: eye-tracking cursor + jaw-tap clicks, paused while you talk, with a live
+Hands-free mouse: eye-tracking cursor + jaw-tap clicks + voice agent, with a live
 debug visualization. Run from the repo root:  python main.py
 
 Pipeline
@@ -15,13 +15,16 @@ Clicks come from jaw taps on the Arduino loudness sensor (jaw_clicker.py -> acti
 Clicks land where you looked just before the tap, and the cursor freezes during the tap.
 The cursor snaps onto nearby buttons/links (snap.py); overlay.py draws the menu and highlights.
 
-While the user is talking, ALL mouse input (cursor and clicks) is paused (talk_detect.py:
-Presage TALKING metric, with a lip-movement fallback). Any new input must check `App.inputs_paused`.
+Pausing (any new input must respect these):
+  App.clicks_paused  - the voice agent is BUSY. Talking on its own does NOT block clicks: talk
+                       detection (talk_detect.py) is shown in the debug window for information only.
+  App.cursor_paused  - the voice agent (voice_link.py -> voice_agent/) is handling a command, from
+                       its wake word until it's done. Cursor freezes, any drag/menu/scroll is dropped.
 
 Hotkeys (global, work even when another window has focus)
   F4  toggle snapping to buttons on/off
   F5  toggle jaw-tap clicks on/off
-  F6  toggle pause-while-talking on/off
+  F6  toggle talk detection (display only) on/off
   F7  toggle cursor control on/off
   F8  recalibrate
   F9  run accuracy validation
@@ -63,6 +66,7 @@ from .jaw_clicker import GESTURES, THRESHOLD as TAP_THRESHOLD, JawClicker
 from .overlay import Overlay
 from .snap import SnapLogic, Snapper
 from .talk_detect import TalkGate
+from .voice_link import VoiceLink
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # repo root
 MODEL_PATH = os.path.join(ROOT, "models", "face_landmarker.task")
@@ -113,6 +117,7 @@ C_WHITE = (240, 240, 240)
 C_GRAY = (120, 120, 120)
 C_DARK = (32, 32, 36)
 C_PANEL = (22, 22, 26)
+C_MAGENTA = (220, 90, 220)
 FONT = cv2.FONT_HERSHEY_SIMPLEX
 
 
@@ -273,7 +278,7 @@ class CursorDriver(threading.Thread):
         self.sw, self.sh = sw, sh
         self.target = None
         self.enabled = False
-        self.paused = False     # True while the user is talking: cursor stays exactly where it is
+        self.paused = False     # True while the voice agent acts: cursor stays exactly where it is
         self.alive = True
         self._pos = None
 
@@ -304,7 +309,7 @@ class App:
     DBG = "Hands-Free Mouse - debug"
     CAL = "Hands-Free Mouse - calibration"
 
-    def __init__(self, cam_index, port=None, clicks=True):
+    def __init__(self, cam_index, port=None, clicks=True, voice=True):
         self.sw, self.sh, self.width_mm = screen_info()
         self.px_per_mm = (self.sw / self.width_mm) if self.width_mm else None
 
@@ -331,9 +336,13 @@ class App:
         self.cursor = CursorDriver(self.sw, self.sh)
         self.cursor.start()
 
-        # Talking pauses ALL mouse input: the cursor (update_gaze/steer) and jaw-tap gestures.
+        # Talk detection: shown in the debug window only; it does not block anything.
         self.talk = TalkGate()
         self.talking = False
+        # The voice agent handling a command pauses everything (cursor + clicks).
+        self.voice = VoiceLink(launch=voice)
+        self.voice.start()
+        self.voice_busy = False
 
         self.actions = Actions(self.sw, self.sh, self.cursor)
         self.overlay = Overlay(self.sw, self.sh)
@@ -427,20 +436,29 @@ class App:
         now = time.time()
         self.talk.feed(frame, info, now)
         self.talking = self.talk.talking(now)
+        self.voice_busy = self.voice.busy
         return frame, info
 
     @property
-    def inputs_paused(self):
-        """True while the user is talking. Every input (cursor, clicks) must respect this."""
-        return self.talking
+    def cursor_paused(self):
+        """True while the voice agent is handling a command: the cursor must not move."""
+        return self.voice_busy
+
+    @property
+    def clicks_paused(self):
+        """True only while the voice agent is BUSY: jaw taps must not click. Talking alone doesn't count."""
+        return self.voice_busy
+
+    def _pause_reason(self):
+        return "voice agent"
 
     def update_gaze(self, info, now):
-        self.cursor.paused = self.inputs_paused
+        self.cursor.paused = self.cursor_paused
         if info is None or not self.model.ready:
             return
         self.iris_trail.append((info["ix"], info["iy"]))
-        if self.inputs_paused:
-            return  # talking: freeze the cursor; mouth movement also distorts the gaze features
+        if self.cursor_paused:
+            return  # voice agent acting: freeze the cursor
         if info["blink"] > BLINK_THRESH:
             return  # hold position through blinks
         raw = self.model.predict(info["feat"])
@@ -474,7 +492,7 @@ class App:
     def handle_taps(self, now):
         while not self.tap_events.empty():
             kind, g, t = self.tap_events.get_nowait()
-            blocked = self.inputs_paused or not self.clicks_enabled
+            blocked = self.clicks_paused or not self.clicks_enabled
             if kind == "tap":
                 if not blocked and self.tap_aim is None:
                     self.tap_aim = self._aim(t)
@@ -486,10 +504,10 @@ class App:
                 self.actions.hold = None
                 self._set_last(f"{name} (clicks off)")
                 continue
-            if self.inputs_paused:
+            if self.clicks_paused:
                 self.actions.hold = None
                 self.blocked += 1
-                self._set_last(f"{name} (blocked: talking)")
+                self._set_last(f"{name} (blocked: {self._pause_reason()})")
                 continue
             if aim is None:
                 aim = self._aim(t)
@@ -500,10 +518,11 @@ class App:
 
     def steer(self, now):
         """Pick the cursor target (freeze > snap > gaze), run modes, update the overlay."""
-        paused = self.inputs_paused
-        if paused and self.actions.mode == "drag":
+        paused = self.cursor_paused
+        if paused and self.actions.mode != "normal":     # voice agent took over: leave any mode
+            was = self.actions.mode
             self.actions.cancel()
-            self._set_last("DROP (talking)")
+            self._set_last(f"{'DROP' if was == 'drag' else 'CANCEL ' + was.upper()} (voice agent)")
         gaze = self.gaze_pt if self.model.ready else None
         snap_on = (self.snap_enabled and self.cursor.enabled and gaze is not None and not paused
                    and self.actions.mode == "normal")
@@ -607,7 +626,8 @@ class App:
                 now = time.time()
                 el = now - t0
                 frame, info = self.grab()
-                good = info is not None and info["blink"] < BLINK_THRESH and not self.talking
+                good = (info is not None and info["blink"] < BLINK_THRESH and not self.talking
+                        and not self.voice_busy)
                 collecting = el >= SETTLE_S
                 if collecting and good:
                     if mode == "calib":
@@ -772,7 +792,7 @@ class App:
         s = cam_w / W
         cam_h = int(H * s)
         panel_w = 380
-        canvas_h = max(cam_h + 214, 560)
+        canvas_h = max(cam_h + 238, 584)
         canvas = np.zeros((canvas_h, cam_w + panel_w, 3), np.uint8)
         canvas[:] = C_PANEL
 
@@ -792,9 +812,12 @@ class App:
                 put(cam, "BLINK - holding", (10, cam_h - 15), 0.7, C_YELLOW, 2, bg=(0, 0, 0))
         else:
             put(cam, "NO FACE", (cam_w // 2 - 70, cam_h // 2), 1.0, C_RED, 2, bg=(0, 0, 0))
-        if self.talking:
-            cv2.rectangle(cam, (0, 0), (cam_w - 1, cam_h - 1), C_RED, 4)
-            put(cam, "TALKING - INPUT PAUSED", (12, 34), 0.8, C_WHITE, 2, bg=(40, 40, 200))
+        if self.voice_busy:
+            cv2.rectangle(cam, (0, 0), (cam_w - 1, cam_h - 1), C_MAGENTA, 4)
+            put(cam, f"VOICE AGENT ({self.voice.phase}) - ALL INPUT PAUSED", (12, 34), 0.7, C_WHITE, 2,
+                bg=(140, 40, 140))
+        elif self.talking:
+            put(cam, "talking", (12, 34), 0.6, C_WHITE, 1, bg=(80, 80, 80))
         if time.time() - self.last_action_t < 1.0:
             put(cam, f"TAP: {self.last_action}", (12, 72), 0.7, C_WHITE, 2, bg=(30, 110, 30))
         canvas[:cam_h, :cam_w] = cam
@@ -917,10 +940,14 @@ class App:
                      f"lips {lt.level:.3f}/{lt.reversals}")
         put(canvas, talk_line, (10, ty + 72), 0.45, C_RED if self.talking else C_GRAY)
         self._draw_clicks(canvas, (10, ty + 96), canvas.shape[1])
-        put(canvas, "F4 snap  F5 clicks  F6 talk-pause  F7 cursor  F8 calib  F9 accuracy  F10 quit",
-            (10, ty + 122), 0.5, C_CYAN)
+        v = self.voice
+        voice_line = f'voice agent: {v.label()}   commands {v.commands}   (say "byte", then a command)'
+        put(canvas, voice_line, (10, ty + 120), 0.45,
+            C_MAGENTA if self.voice_busy else (C_GREEN if v.status == "running" else C_GRAY))
+        put(canvas, "F4 snap  F5 clicks  F6 talk-detect  F7 cursor  F8 calib  F9 accuracy  F10 quit",
+            (10, ty + 146), 0.5, C_CYAN)
         if time.time() < self.message_until:
-            put(canvas, self.message, (10, ty + 148), 0.5, C_YELLOW)
+            put(canvas, self.message, (10, ty + 172), 0.5, C_YELLOW)
         return canvas
 
     def _draw_clicks(self, canvas, org, width):
@@ -935,7 +962,7 @@ class App:
             rate = f"{c.raw_rate / 1000:.0f}k/s" if c.raw_rate >= 1000 else f"{c.raw_rate:.0f}/s"
             text = (f"clicks [{c.port} {rate}]: {state}   taps {c.det.taps}   "
                     f"blocked {self.blocked}   last: {self.last_action or '-'}")
-        color = (C_RED if (c.status != "running" or self.inputs_paused)
+        color = (C_RED if (c.status != "running" or self.clicks_paused)
                  else (C_GREEN if self.clicks_enabled else C_YELLOW))
         put(canvas, text, org, 0.45, color)
         # sparkline of the tap signal (red line = threshold), right-aligned on the same row
@@ -972,7 +999,7 @@ class App:
                             self.flash("Clicks disabled (--no-clicks)", 3)
                     elif ev == "talk":
                         self.talk.enabled = not self.talk.enabled
-                        self.flash(f"Pause-while-talking {'ON' if self.talk.enabled else 'OFF'}", 3)
+                        self.flash(f"Talk detection (display only) {'ON' if self.talk.enabled else 'OFF'}", 3)
                     elif ev == "toggle":
                         if self.model.ready:
                             self.cursor.set_enabled(not self.cursor.enabled)
@@ -1021,6 +1048,7 @@ class App:
             self.cursor.alive = False
             self.listener.stop()
             self.talk.close()
+            self.voice.close()
             if self.clicker:
                 self.clicker.close()
             self.actions.cancel()        # never leave the left button held on exit
@@ -1043,10 +1071,11 @@ def main():
     ap.add_argument("--camera", type=int, default=0, help="camera index (default 0)")
     ap.add_argument("--port", help="Arduino COM port (default: auto-detect)")
     ap.add_argument("--no-clicks", action="store_true", help="eye cursor only, no Arduino")
+    ap.add_argument("--no-voice", action="store_true", help="don't start/use the voice agent")
     args = ap.parse_args()
     if not os.path.exists(MODEL_PATH):
         raise SystemExit(f"Missing model file: {MODEL_PATH}")
-    App(args.camera, port=args.port, clicks=not args.no_clicks).run()
+    App(args.camera, port=args.port, clicks=not args.no_clicks, voice=not args.no_voice).run()
 
 
 if __name__ == "__main__":

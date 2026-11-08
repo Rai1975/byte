@@ -4,7 +4,7 @@ An assistive, hands-free mouse inspired by Augmental's MouthPad. One piece of so
 
 1. **Cursor movement**: webcam eye tracking (current focus)
 2. **Clicks**: subtle facial gestures, specifically **biting / jaw clenching** (not mouth opening). Movements should feel as natural and subtle as possible.
-3. **Speech-to-text**: use existing software. Not built yet.
+3. **Voice commands**: the teammate's `voice_agent/` ("byte" wake word → local Whisper → Claude tool use). Integrated on the `integration` branch.
 
 ## Environment
 
@@ -16,7 +16,7 @@ An assistive, hands-free mouse inspired by Augmental's MouthPad. One piece of so
 
 ## Repo
 
-- Remote: `https://github.com/Rai1975/makeuc.git`. Current branch is `feat/presage`.
+- Remote: `https://github.com/Rai1975/makeuc.git`. Work happens on `integration`, branched from `main` on 2026-11-08. `feat/presage` is merged. `feat/eye_tracking` is stale (old `eye-track/` layout): the user said to ignore it, don't merge it.
 - Ask before pushing.
 - Restructured on 2026-11-07 into one app (`python main.py`). The teammate's `sensor/` folder is gone:
   - `plot.py` became `tools/tap_plot.py`.
@@ -27,13 +27,15 @@ An assistive, hands-free mouse inspired by Augmental's MouthPad. One piece of so
 
 | Path | Purpose |
 |------|---------|
-| `main.py` | Entry point. Flags: `--no-clicks`, `--port COMx`, `--camera N`. |
-| `handsfree/app.py` | Eye cursor + debug window + `App` (MediaPipe Tasks FaceLandmarker → features → ridge regression from a 13-point calibration → One Euro → 120 Hz pynput thread). Per frame: `update_gaze` → `handle_taps` (events from JawClicker, aim = avg gaze 350–30 ms before the first tap or the snap centre) → `steer` (cursor target = freeze hold > snap centre > gaze; overlay state). `App.inputs_paused` gates the cursor AND all gestures. Hotkeys: F4 snap, F5 clicks, F6 talk-pause, F7 cursor, F8 calibrate, F9 accuracy, F10 quit. Camera runs at 640x480: this laptop only gives 30 fps at ≤640x480, and 720p drops to 5 fps, which broke Presage. |
+| `main.py` | Entry point. Flags: `--no-clicks`, `--no-voice`, `--port COMx`, `--camera N`. |
+| `handsfree/app.py` | Eye cursor + debug window + `App` (MediaPipe Tasks FaceLandmarker → features → ridge regression from a 13-point calibration → One Euro → 120 Hz pynput thread). Per frame: `update_gaze` → `handle_taps` (events from JawClicker, aim = avg gaze 350–30 ms before the first tap or the snap centre) → `steer` (cursor target = freeze hold > snap centre > gaze; overlay state). Two pause gates: `App.clicks_paused` and `App.cursor_paused` are BOTH true only while the voice agent is BUSY (blocks gestures, freezes the cursor, cancels any mode). Talking alone blocks nothing (user's choice, 2026-11-08); talk detection is display-only and still skips calibration samples. Hotkeys: F4 snap, F5 clicks, F6 talk-detect (display), F7 cursor, F8 calibrate, F9 accuracy, F10 quit. Camera runs at 640x480: this laptop only gives 30 fps at ≤640x480, and 720p drops to 5 fps, which broke Presage. |
 | `handsfree/jaw_clicker.py` | `find_port()` (Arduino VID 0x2341), `SerialTicks` (bulk serial read → ~1 ms block-average ticks carrying their real `tick_ms`), `TapDetector` (teammate's fast/slow envelope algorithm with ms-based timing: THRESHOLD 15, CLICK_GAP_MS 250), `JawClicker` thread (pure detector: emits `('tap'|'gesture', n, t)` via `on_event`). |
 | `handsfree/actions.py` | Gesture map: 1 = click, 2 = double, 3 = radial action menu (Right click / Drag-select / Scroll / Zoom, picked by gaze + 1 tap). Freezes the cursor from the first tap until the click, plus 0.2 s. |
 | `handsfree/snap.py` | `Snapper` thread (uiautomation ControlFromPoint at the gaze + 8 points at r=50, about 65 ms per scan) + `SnapLogic` (in 45 px, out 90 px, 0.12 s dwell; over text, capture only inside the target; skips elements bigger than 420x160). |
 | `handsfree/overlay.py` | Tk thread with a full-screen transparent-colour-key window, click-through + no-activate exstyles. Gives focus back to the previous window on start. Tk objects are torn down in its own thread (otherwise you get `Tcl_AsyncDelete`). |
 | `handsfree/talk_detect.py` | `PresageTalk` (Node bridge), `LocalTalk` (lip-gap fallback), `TalkGate` (auto mode, 0.7 s hold). Reads the key from `.env` at the repo root. |
+| `handsfree/voice_link.py` | `VoiceLink` thread: starts `voice_agent/agent.py` with `voice_agent/.venv/Scripts/python.exe` (CREATE_NO_WINDOW; reuses an already-running agent), polls `GET 127.0.0.1:8765/status` every 0.1 s. `busy` is False if no answer for 1 s or busy for over 40 s (failsafes). Terminates the agent on exit only if it started it. |
+| `voice_agent/` | Teammate's voice agent (own Python 3.12 venv: faster-whisper on CUDA, sherpa-onnx wake word "byte", anthropic). `Agent.phase` (recording/transcribing/acting) is set in `handle_utterance`; `/status` returns `busy`. Never sends mouse input or F4–F10 (`winapi.BLOCKED_KEYS`). Its venv is NOT set up on this laptop yet. |
 | `presage/talk_bridge.mjs` | Node bridge: stdin frames (16-byte `<IId` header + BGR) → `sdk.sendFrame` → stdout JSON. On retryable errors it restarts with reset()+start(), max 5 per minute. `npm install` in `presage/`. |
 | `tools/tap_plot.py`, `tools/sensor_stream.py` | Testing/tuning the sensor on its own. `tap_plot.py` sends no clicks unless `--click`. |
 | `arduino/loudness/loudness.ino` | Streams analogRead(A0) with no delay. |
@@ -61,7 +63,8 @@ Sensor facts:
 
 1. The user tests per the README: calibration, sensor tools, tap tuning, talking. Then the gesture map, action menu and snapping in `python main.py`.
 2. Tune the snap zones and `AIM_WINDOW_S` with real use.
-3. Speech-to-text is not built yet. Spoken commands ("right click", "scroll down") could slot into `actions.py`.
+3. Set up `voice_agent/.venv` on this laptop and test the voice pause for real (only tested against the agent's real control server with a faked phase).
+4. Idea: the jaw clench could trigger the agent via `POST /trigger` (push-to-talk) instead of the wake word.
 
 ## Working preferences
 
