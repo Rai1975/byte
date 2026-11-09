@@ -12,6 +12,11 @@ Byte lets someone use a Windows PC without touching a mouse or keyboard. It uses
 
 It's built for people with limited hand mobility, and for anyone who wants their hands free. Everything runs as one program, `python main.py`.
 
+<p align="center">
+  <a href="https://youtu.be/4jdJvRfPKm8"><img src="https://img.youtube.com/vi/4jdJvRfPKm8/maxresdefault.jpg" alt="Byte demo video" width="720"></a>
+  <br><em>▶ Watch the demo on YouTube</em>
+</p>
+
 ---
 
 ## Highlights
